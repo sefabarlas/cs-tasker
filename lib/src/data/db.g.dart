@@ -35,20 +35,47 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
-  static const VerificationMeta _isCompletedMeta = const VerificationMeta(
-    'isCompleted',
-  );
+  static const VerificationMeta _doneMeta = const VerificationMeta('done');
   @override
-  late final GeneratedColumn<bool> isCompleted = GeneratedColumn<bool>(
-    'is_completed',
+  late final GeneratedColumn<bool> done = GeneratedColumn<bool>(
+    'done',
     aliasedName,
     false,
     type: DriftSqlType.bool,
     requiredDuringInsert: false,
     defaultConstraints: GeneratedColumn.constraintIsAlways(
-      'CHECK ("is_completed" IN (0, 1))',
+      'CHECK ("done" IN (0, 1))',
     ),
     defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _dueMeta = const VerificationMeta('due');
+  @override
+  late final GeneratedColumn<int> due = GeneratedColumn<int>(
+    'due',
+    aliasedName,
+    true,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _repeatMeta = const VerificationMeta('repeat');
+  @override
+  late final GeneratedColumn<int> repeat = GeneratedColumn<int>(
+    'repeat',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _sortMeta = const VerificationMeta('sort');
+  @override
+  late final GeneratedColumn<int> sort = GeneratedColumn<int>(
+    'sort',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
   );
   static const VerificationMeta _createdAtUtcMeta = const VerificationMeta(
     'createdAtUtc',
@@ -77,7 +104,10 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
     id,
     title,
     notes,
-    isCompleted,
+    done,
+    due,
+    repeat,
+    sort,
     createdAtUtc,
     updatedAtUtc,
   ];
@@ -112,13 +142,28 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
         notes.isAcceptableOrUnknown(data['notes']!, _notesMeta),
       );
     }
-    if (data.containsKey('is_completed')) {
+    if (data.containsKey('done')) {
       context.handle(
-        _isCompletedMeta,
-        isCompleted.isAcceptableOrUnknown(
-          data['is_completed']!,
-          _isCompletedMeta,
-        ),
+        _doneMeta,
+        done.isAcceptableOrUnknown(data['done']!, _doneMeta),
+      );
+    }
+    if (data.containsKey('due')) {
+      context.handle(
+        _dueMeta,
+        due.isAcceptableOrUnknown(data['due']!, _dueMeta),
+      );
+    }
+    if (data.containsKey('repeat')) {
+      context.handle(
+        _repeatMeta,
+        repeat.isAcceptableOrUnknown(data['repeat']!, _repeatMeta),
+      );
+    }
+    if (data.containsKey('sort')) {
+      context.handle(
+        _sortMeta,
+        sort.isAcceptableOrUnknown(data['sort']!, _sortMeta),
       );
     }
     if (data.containsKey('created_at_utc')) {
@@ -162,9 +207,21 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
         DriftSqlType.string,
         data['${effectivePrefix}notes'],
       ),
-      isCompleted: attachedDatabase.typeMapping.read(
+      done: attachedDatabase.typeMapping.read(
         DriftSqlType.bool,
-        data['${effectivePrefix}is_completed'],
+        data['${effectivePrefix}done'],
+      )!,
+      due: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}due'],
+      ),
+      repeat: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}repeat'],
+      )!,
+      sort: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}sort'],
       )!,
       createdAtUtc: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
@@ -187,14 +244,20 @@ class Task extends DataClass implements Insertable<Task> {
   final String id;
   final String title;
   final String? notes;
-  final bool isCompleted;
+  final bool done;
+  final int? due;
+  final int repeat;
+  final int sort;
   final DateTime createdAtUtc;
   final DateTime? updatedAtUtc;
   const Task({
     required this.id,
     required this.title,
     this.notes,
-    required this.isCompleted,
+    required this.done,
+    this.due,
+    required this.repeat,
+    required this.sort,
     required this.createdAtUtc,
     this.updatedAtUtc,
   });
@@ -206,7 +269,12 @@ class Task extends DataClass implements Insertable<Task> {
     if (!nullToAbsent || notes != null) {
       map['notes'] = Variable<String>(notes);
     }
-    map['is_completed'] = Variable<bool>(isCompleted);
+    map['done'] = Variable<bool>(done);
+    if (!nullToAbsent || due != null) {
+      map['due'] = Variable<int>(due);
+    }
+    map['repeat'] = Variable<int>(repeat);
+    map['sort'] = Variable<int>(sort);
     map['created_at_utc'] = Variable<DateTime>(createdAtUtc);
     if (!nullToAbsent || updatedAtUtc != null) {
       map['updated_at_utc'] = Variable<DateTime>(updatedAtUtc);
@@ -221,7 +289,10 @@ class Task extends DataClass implements Insertable<Task> {
       notes: notes == null && nullToAbsent
           ? const Value.absent()
           : Value(notes),
-      isCompleted: Value(isCompleted),
+      done: Value(done),
+      due: due == null && nullToAbsent ? const Value.absent() : Value(due),
+      repeat: Value(repeat),
+      sort: Value(sort),
       createdAtUtc: Value(createdAtUtc),
       updatedAtUtc: updatedAtUtc == null && nullToAbsent
           ? const Value.absent()
@@ -238,7 +309,10 @@ class Task extends DataClass implements Insertable<Task> {
       id: serializer.fromJson<String>(json['id']),
       title: serializer.fromJson<String>(json['title']),
       notes: serializer.fromJson<String?>(json['notes']),
-      isCompleted: serializer.fromJson<bool>(json['isCompleted']),
+      done: serializer.fromJson<bool>(json['done']),
+      due: serializer.fromJson<int?>(json['due']),
+      repeat: serializer.fromJson<int>(json['repeat']),
+      sort: serializer.fromJson<int>(json['sort']),
       createdAtUtc: serializer.fromJson<DateTime>(json['createdAtUtc']),
       updatedAtUtc: serializer.fromJson<DateTime?>(json['updatedAtUtc']),
     );
@@ -250,7 +324,10 @@ class Task extends DataClass implements Insertable<Task> {
       'id': serializer.toJson<String>(id),
       'title': serializer.toJson<String>(title),
       'notes': serializer.toJson<String?>(notes),
-      'isCompleted': serializer.toJson<bool>(isCompleted),
+      'done': serializer.toJson<bool>(done),
+      'due': serializer.toJson<int?>(due),
+      'repeat': serializer.toJson<int>(repeat),
+      'sort': serializer.toJson<int>(sort),
       'createdAtUtc': serializer.toJson<DateTime>(createdAtUtc),
       'updatedAtUtc': serializer.toJson<DateTime?>(updatedAtUtc),
     };
@@ -260,14 +337,20 @@ class Task extends DataClass implements Insertable<Task> {
     String? id,
     String? title,
     Value<String?> notes = const Value.absent(),
-    bool? isCompleted,
+    bool? done,
+    Value<int?> due = const Value.absent(),
+    int? repeat,
+    int? sort,
     DateTime? createdAtUtc,
     Value<DateTime?> updatedAtUtc = const Value.absent(),
   }) => Task(
     id: id ?? this.id,
     title: title ?? this.title,
     notes: notes.present ? notes.value : this.notes,
-    isCompleted: isCompleted ?? this.isCompleted,
+    done: done ?? this.done,
+    due: due.present ? due.value : this.due,
+    repeat: repeat ?? this.repeat,
+    sort: sort ?? this.sort,
     createdAtUtc: createdAtUtc ?? this.createdAtUtc,
     updatedAtUtc: updatedAtUtc.present ? updatedAtUtc.value : this.updatedAtUtc,
   );
@@ -276,9 +359,10 @@ class Task extends DataClass implements Insertable<Task> {
       id: data.id.present ? data.id.value : this.id,
       title: data.title.present ? data.title.value : this.title,
       notes: data.notes.present ? data.notes.value : this.notes,
-      isCompleted: data.isCompleted.present
-          ? data.isCompleted.value
-          : this.isCompleted,
+      done: data.done.present ? data.done.value : this.done,
+      due: data.due.present ? data.due.value : this.due,
+      repeat: data.repeat.present ? data.repeat.value : this.repeat,
+      sort: data.sort.present ? data.sort.value : this.sort,
       createdAtUtc: data.createdAtUtc.present
           ? data.createdAtUtc.value
           : this.createdAtUtc,
@@ -294,7 +378,10 @@ class Task extends DataClass implements Insertable<Task> {
           ..write('id: $id, ')
           ..write('title: $title, ')
           ..write('notes: $notes, ')
-          ..write('isCompleted: $isCompleted, ')
+          ..write('done: $done, ')
+          ..write('due: $due, ')
+          ..write('repeat: $repeat, ')
+          ..write('sort: $sort, ')
           ..write('createdAtUtc: $createdAtUtc, ')
           ..write('updatedAtUtc: $updatedAtUtc')
           ..write(')'))
@@ -302,8 +389,17 @@ class Task extends DataClass implements Insertable<Task> {
   }
 
   @override
-  int get hashCode =>
-      Object.hash(id, title, notes, isCompleted, createdAtUtc, updatedAtUtc);
+  int get hashCode => Object.hash(
+    id,
+    title,
+    notes,
+    done,
+    due,
+    repeat,
+    sort,
+    createdAtUtc,
+    updatedAtUtc,
+  );
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
@@ -311,7 +407,10 @@ class Task extends DataClass implements Insertable<Task> {
           other.id == this.id &&
           other.title == this.title &&
           other.notes == this.notes &&
-          other.isCompleted == this.isCompleted &&
+          other.done == this.done &&
+          other.due == this.due &&
+          other.repeat == this.repeat &&
+          other.sort == this.sort &&
           other.createdAtUtc == this.createdAtUtc &&
           other.updatedAtUtc == this.updatedAtUtc);
 }
@@ -320,7 +419,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
   final Value<String> id;
   final Value<String> title;
   final Value<String?> notes;
-  final Value<bool> isCompleted;
+  final Value<bool> done;
+  final Value<int?> due;
+  final Value<int> repeat;
+  final Value<int> sort;
   final Value<DateTime> createdAtUtc;
   final Value<DateTime?> updatedAtUtc;
   final Value<int> rowid;
@@ -328,7 +430,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
     this.id = const Value.absent(),
     this.title = const Value.absent(),
     this.notes = const Value.absent(),
-    this.isCompleted = const Value.absent(),
+    this.done = const Value.absent(),
+    this.due = const Value.absent(),
+    this.repeat = const Value.absent(),
+    this.sort = const Value.absent(),
     this.createdAtUtc = const Value.absent(),
     this.updatedAtUtc = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -337,7 +442,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
     required String id,
     required String title,
     this.notes = const Value.absent(),
-    this.isCompleted = const Value.absent(),
+    this.done = const Value.absent(),
+    this.due = const Value.absent(),
+    this.repeat = const Value.absent(),
+    this.sort = const Value.absent(),
     required DateTime createdAtUtc,
     this.updatedAtUtc = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -348,7 +456,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
     Expression<String>? id,
     Expression<String>? title,
     Expression<String>? notes,
-    Expression<bool>? isCompleted,
+    Expression<bool>? done,
+    Expression<int>? due,
+    Expression<int>? repeat,
+    Expression<int>? sort,
     Expression<DateTime>? createdAtUtc,
     Expression<DateTime>? updatedAtUtc,
     Expression<int>? rowid,
@@ -357,7 +468,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
       if (id != null) 'id': id,
       if (title != null) 'title': title,
       if (notes != null) 'notes': notes,
-      if (isCompleted != null) 'is_completed': isCompleted,
+      if (done != null) 'done': done,
+      if (due != null) 'due': due,
+      if (repeat != null) 'repeat': repeat,
+      if (sort != null) 'sort': sort,
       if (createdAtUtc != null) 'created_at_utc': createdAtUtc,
       if (updatedAtUtc != null) 'updated_at_utc': updatedAtUtc,
       if (rowid != null) 'rowid': rowid,
@@ -368,7 +482,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
     Value<String>? id,
     Value<String>? title,
     Value<String?>? notes,
-    Value<bool>? isCompleted,
+    Value<bool>? done,
+    Value<int?>? due,
+    Value<int>? repeat,
+    Value<int>? sort,
     Value<DateTime>? createdAtUtc,
     Value<DateTime?>? updatedAtUtc,
     Value<int>? rowid,
@@ -377,7 +494,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
       id: id ?? this.id,
       title: title ?? this.title,
       notes: notes ?? this.notes,
-      isCompleted: isCompleted ?? this.isCompleted,
+      done: done ?? this.done,
+      due: due ?? this.due,
+      repeat: repeat ?? this.repeat,
+      sort: sort ?? this.sort,
       createdAtUtc: createdAtUtc ?? this.createdAtUtc,
       updatedAtUtc: updatedAtUtc ?? this.updatedAtUtc,
       rowid: rowid ?? this.rowid,
@@ -396,8 +516,17 @@ class TasksCompanion extends UpdateCompanion<Task> {
     if (notes.present) {
       map['notes'] = Variable<String>(notes.value);
     }
-    if (isCompleted.present) {
-      map['is_completed'] = Variable<bool>(isCompleted.value);
+    if (done.present) {
+      map['done'] = Variable<bool>(done.value);
+    }
+    if (due.present) {
+      map['due'] = Variable<int>(due.value);
+    }
+    if (repeat.present) {
+      map['repeat'] = Variable<int>(repeat.value);
+    }
+    if (sort.present) {
+      map['sort'] = Variable<int>(sort.value);
     }
     if (createdAtUtc.present) {
       map['created_at_utc'] = Variable<DateTime>(createdAtUtc.value);
@@ -417,7 +546,10 @@ class TasksCompanion extends UpdateCompanion<Task> {
           ..write('id: $id, ')
           ..write('title: $title, ')
           ..write('notes: $notes, ')
-          ..write('isCompleted: $isCompleted, ')
+          ..write('done: $done, ')
+          ..write('due: $due, ')
+          ..write('repeat: $repeat, ')
+          ..write('sort: $sort, ')
           ..write('createdAtUtc: $createdAtUtc, ')
           ..write('updatedAtUtc: $updatedAtUtc, ')
           ..write('rowid: $rowid')
@@ -922,7 +1054,10 @@ typedef $$TasksTableCreateCompanionBuilder =
       required String id,
       required String title,
       Value<String?> notes,
-      Value<bool> isCompleted,
+      Value<bool> done,
+      Value<int?> due,
+      Value<int> repeat,
+      Value<int> sort,
       required DateTime createdAtUtc,
       Value<DateTime?> updatedAtUtc,
       Value<int> rowid,
@@ -932,7 +1067,10 @@ typedef $$TasksTableUpdateCompanionBuilder =
       Value<String> id,
       Value<String> title,
       Value<String?> notes,
-      Value<bool> isCompleted,
+      Value<bool> done,
+      Value<int?> due,
+      Value<int> repeat,
+      Value<int> sort,
       Value<DateTime> createdAtUtc,
       Value<DateTime?> updatedAtUtc,
       Value<int> rowid,
@@ -961,8 +1099,23 @@ class $$TasksTableFilterComposer extends Composer<_$AppDb, $TasksTable> {
     builder: (column) => ColumnFilters(column),
   );
 
-  ColumnFilters<bool> get isCompleted => $composableBuilder(
-    column: $table.isCompleted,
+  ColumnFilters<bool> get done => $composableBuilder(
+    column: $table.done,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get due => $composableBuilder(
+    column: $table.due,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get repeat => $composableBuilder(
+    column: $table.repeat,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get sort => $composableBuilder(
+    column: $table.sort,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1000,8 +1153,23 @@ class $$TasksTableOrderingComposer extends Composer<_$AppDb, $TasksTable> {
     builder: (column) => ColumnOrderings(column),
   );
 
-  ColumnOrderings<bool> get isCompleted => $composableBuilder(
-    column: $table.isCompleted,
+  ColumnOrderings<bool> get done => $composableBuilder(
+    column: $table.done,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get due => $composableBuilder(
+    column: $table.due,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get repeat => $composableBuilder(
+    column: $table.repeat,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get sort => $composableBuilder(
+    column: $table.sort,
     builder: (column) => ColumnOrderings(column),
   );
 
@@ -1033,10 +1201,17 @@ class $$TasksTableAnnotationComposer extends Composer<_$AppDb, $TasksTable> {
   GeneratedColumn<String> get notes =>
       $composableBuilder(column: $table.notes, builder: (column) => column);
 
-  GeneratedColumn<bool> get isCompleted => $composableBuilder(
-    column: $table.isCompleted,
-    builder: (column) => column,
-  );
+  GeneratedColumn<bool> get done =>
+      $composableBuilder(column: $table.done, builder: (column) => column);
+
+  GeneratedColumn<int> get due =>
+      $composableBuilder(column: $table.due, builder: (column) => column);
+
+  GeneratedColumn<int> get repeat =>
+      $composableBuilder(column: $table.repeat, builder: (column) => column);
+
+  GeneratedColumn<int> get sort =>
+      $composableBuilder(column: $table.sort, builder: (column) => column);
 
   GeneratedColumn<DateTime> get createdAtUtc => $composableBuilder(
     column: $table.createdAtUtc,
@@ -1080,7 +1255,10 @@ class $$TasksTableTableManager
                 Value<String> id = const Value.absent(),
                 Value<String> title = const Value.absent(),
                 Value<String?> notes = const Value.absent(),
-                Value<bool> isCompleted = const Value.absent(),
+                Value<bool> done = const Value.absent(),
+                Value<int?> due = const Value.absent(),
+                Value<int> repeat = const Value.absent(),
+                Value<int> sort = const Value.absent(),
                 Value<DateTime> createdAtUtc = const Value.absent(),
                 Value<DateTime?> updatedAtUtc = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1088,7 +1266,10 @@ class $$TasksTableTableManager
                 id: id,
                 title: title,
                 notes: notes,
-                isCompleted: isCompleted,
+                done: done,
+                due: due,
+                repeat: repeat,
+                sort: sort,
                 createdAtUtc: createdAtUtc,
                 updatedAtUtc: updatedAtUtc,
                 rowid: rowid,
@@ -1098,7 +1279,10 @@ class $$TasksTableTableManager
                 required String id,
                 required String title,
                 Value<String?> notes = const Value.absent(),
-                Value<bool> isCompleted = const Value.absent(),
+                Value<bool> done = const Value.absent(),
+                Value<int?> due = const Value.absent(),
+                Value<int> repeat = const Value.absent(),
+                Value<int> sort = const Value.absent(),
                 required DateTime createdAtUtc,
                 Value<DateTime?> updatedAtUtc = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1106,7 +1290,10 @@ class $$TasksTableTableManager
                 id: id,
                 title: title,
                 notes: notes,
-                isCompleted: isCompleted,
+                done: done,
+                due: due,
+                repeat: repeat,
+                sort: sort,
                 createdAtUtc: createdAtUtc,
                 updatedAtUtc: updatedAtUtc,
                 rowid: rowid,

@@ -3,11 +3,7 @@ import 'package:flutter/material.dart';
 import '../models/task.dart';
 
 class TaskTile extends StatelessWidget {
-  const TaskTile({
-    super.key,
-    required this.task,
-    this.onTap,
-  });
+  const TaskTile({super.key, required this.task, this.onTap});
 
   final Task task;
   final VoidCallback? onTap;
@@ -21,7 +17,8 @@ class TaskTile extends StatelessWidget {
     final due = task.due;
 
     final isOverdue = due != null && !task.done && due.isBefore(now);
-    final isToday = due != null &&
+    final isToday =
+        due != null &&
         DateTime(due.year, due.month, due.day) ==
             DateTime(now.year, now.month, now.day);
 
@@ -59,8 +56,10 @@ class TaskTile extends StatelessWidget {
               ),
               Expanded(
                 child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -80,10 +79,10 @@ class TaskTile extends StatelessWidget {
                                     : null,
                                 color: task.done
                                     ? theme.textTheme.titleMedium?.color
-                                        ?.withOpacity(0.6)
+                                          ?.withOpacity(0.6)
                                     : (isOverdue
-                                        ? Colors.red.shade700
-                                        : theme.textTheme.titleMedium?.color),
+                                          ? Colors.red.shade700
+                                          : theme.textTheme.titleMedium?.color),
                               ),
                             ),
                           ),
@@ -129,13 +128,13 @@ class TaskTile extends StatelessWidget {
                               color: isOverdue
                                   ? Colors.red.withOpacity(.15)
                                   : isToday
-                                      ? scheme.secondaryContainer
-                                      : scheme.surfaceVariant,
+                                  ? scheme.secondaryContainer
+                                  : scheme.surfaceVariant,
                               onColor: isOverdue
                                   ? Colors.red.shade700
                                   : (isToday
-                                      ? scheme.onSecondaryContainer
-                                      : scheme.onSurfaceVariant),
+                                        ? scheme.onSecondaryContainer
+                                        : scheme.onSurfaceVariant),
                             ),
                           if (task.repeat != RepeatRule.none)
                             _MiniChip(
@@ -186,10 +185,9 @@ class _MiniChip extends StatelessWidget {
           const SizedBox(width: 4),
           Text(
             label,
-            style: Theme.of(context)
-                .textTheme
-                .labelSmall
-                ?.copyWith(color: onColor),
+            style: Theme.of(
+              context,
+            ).textTheme.labelSmall?.copyWith(color: onColor),
           ),
         ],
       ),
@@ -213,7 +211,7 @@ String _formatDateSmart(DateTime d) {
 
   if (d.difference(now).inDays.abs() < 7) {
     // 1 hafta içinde: gün kısaltması + saat
-    const days = ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'];
+    const days = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
     return '${days[d.weekday - 1]} ${_two(d.hour)}:${_two(d.minute)}';
   }
 

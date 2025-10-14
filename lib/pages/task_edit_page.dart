@@ -55,10 +55,8 @@ class _TaskEditPageState extends ConsumerState<TaskEditPage> {
       helpText: 'Tarih seç',
       cancelText: 'Vazgeç',
       confirmText: 'Devam',
-      builder: (ctx, child) => Theme(
-        data: theme.copyWith(useMaterial3: true),
-        child: child!,
-      ),
+      builder: (ctx, child) =>
+          Theme(data: theme.copyWith(useMaterial3: true), child: child!),
     );
     if (date == null) return;
 
@@ -68,10 +66,8 @@ class _TaskEditPageState extends ConsumerState<TaskEditPage> {
       helpText: 'Saat seç',
       cancelText: 'Vazgeç',
       confirmText: 'Tamam',
-      builder: (ctx, child) => Theme(
-        data: theme.copyWith(useMaterial3: true),
-        child: child!,
-      ),
+      builder: (ctx, child) =>
+          Theme(data: theme.copyWith(useMaterial3: true), child: child!),
     );
     if (tod == null) return;
 
@@ -134,9 +130,7 @@ class _TaskEditPageState extends ConsumerState<TaskEditPage> {
     return Scaffold(
       appBar: AppBar(
         title: Text(isEdit ? 'Görevi Düzenle' : 'Yeni Görev'),
-        actions: [
-          TextButton(onPressed: _save, child: const Text('Kaydet')),
-        ],
+        actions: [TextButton(onPressed: _save, child: const Text('Kaydet'))],
       ),
       body: Form(
         key: _formKey,
@@ -231,9 +225,18 @@ class _TaskEditPageState extends ConsumerState<TaskEditPage> {
               decoration: const InputDecoration(labelText: 'Tekrar'),
               items: const [
                 DropdownMenuItem(value: RepeatRule.none, child: Text('Yok')),
-                DropdownMenuItem(value: RepeatRule.daily, child: Text('Günlük')),
-                DropdownMenuItem(value: RepeatRule.weekly, child: Text('Haftalık')),
-                DropdownMenuItem(value: RepeatRule.monthly, child: Text('Aylık')),
+                DropdownMenuItem(
+                  value: RepeatRule.daily,
+                  child: Text('Günlük'),
+                ),
+                DropdownMenuItem(
+                  value: RepeatRule.weekly,
+                  child: Text('Haftalık'),
+                ),
+                DropdownMenuItem(
+                  value: RepeatRule.monthly,
+                  child: Text('Aylık'),
+                ),
               ],
               onChanged: (v) => setState(() => _repeat = v ?? RepeatRule.none),
             ),

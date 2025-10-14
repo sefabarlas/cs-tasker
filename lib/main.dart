@@ -42,11 +42,11 @@ Future<void> main() async {
       data = parts.elementAtOrNull(1) ?? '';
     }
 
-    final m = RegExp(r'taskId:(\d+)').firstMatch(data);
+    final m = RegExp(
+      r'taskId:(.+)',
+    ).firstMatch(data); // Regex artık sadece sayıyı değil, her şeyi eşleştirsin
     if (m == null) return;
-
-    final id = int.tryParse(m.group(1)!);
-    if (id == null) return;
+    final String id = m.group(1)!;
 
     final ctx = navigatorKey.currentContext;
     if (ctx == null) return;
@@ -68,9 +68,9 @@ Future<void> main() async {
     }
 
     // aksiyon yoksa => detay sayfasına git
-    Navigator.of(ctx).push(
-      MaterialPageRoute(builder: (_) => TaskEditPage(initial: task)),
-    );
+    Navigator.of(
+      ctx,
+    ).push(MaterialPageRoute(builder: (_) => TaskEditPage(initial: task)));
   });
 }
 
@@ -90,7 +90,9 @@ class TaskerApp extends StatelessWidget {
         cardTheme: CardThemeData(
           elevation: 0,
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
         ),
         chipTheme: const ChipThemeData(
           showCheckmark: false,

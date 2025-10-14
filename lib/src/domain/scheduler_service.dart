@@ -14,7 +14,7 @@ class SchedulerService {
     required String body,
   }) async {
     final tzdt = _time.localToTz(tzId, localDateTime);
-    await NotificationService.instance.scheduleExact(
+    await NotificationService.scheduleAt(
       id: notificationId,
       title: title,
       body: body,
@@ -29,7 +29,7 @@ class SchedulerService {
     required String body,
   }) async {
     final when = tz.TZDateTime.now(tz.local).add(delta);
-    await NotificationService.instance.scheduleExact(
+    await NotificationService.scheduleAt(
       id: notificationId,
       title: title,
       body: body,
@@ -38,5 +38,5 @@ class SchedulerService {
   }
 
   Future<void> cancel(int notificationId) =>
-      NotificationService.instance.cancel(notificationId);
+      NotificationService.cancel(notificationId);
 }

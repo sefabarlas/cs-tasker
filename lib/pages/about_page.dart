@@ -10,9 +10,7 @@ class AboutPage extends StatelessWidget {
     final scheme = theme.colorScheme;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Hakkında'),
-      ),
+      appBar: AppBar(title: const Text('Hakkında')),
       body: ListView(
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
         children: [

@@ -74,18 +74,18 @@ class _HomePageState extends ConsumerState<HomePage> {
             tooltip: 'Hakkında',
             icon: const Icon(Icons.info_outline),
             onPressed: () {
-              Navigator.of(context).push(
-                MaterialPageRoute(builder: (_) => const AboutPage()),
-              );
+              Navigator.of(
+                context,
+              ).push(MaterialPageRoute(builder: (_) => const AboutPage()));
             },
           ),
           PopupMenuButton<String>(
             onSelected: (v) async {
               if (v == 'backup') {
                 if (!context.mounted) return;
-                Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const BackupPage()),
-                );
+                Navigator.of(
+                  context,
+                ).push(MaterialPageRoute(builder: (_) => const BackupPage()));
               }
             },
             itemBuilder: (_) => const [
@@ -105,9 +105,21 @@ class _HomePageState extends ConsumerState<HomePage> {
                 // 🗂️ Filtreler
                 SegmentedButton<TaskFilter>(
                   segments: const [
-                    ButtonSegment(value: TaskFilter.all, label: Text('Tümü'), icon: Icon(Icons.list_alt)),
-                    ButtonSegment(value: TaskFilter.today, label: Text('Bugün'), icon: Icon(Icons.today)),
-                    ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
+                    ButtonSegment(
+                      value: TaskFilter.all,
+                      label: Text('Tümü'),
+                      icon: Icon(Icons.list_alt),
+                    ),
+                    ButtonSegment(
+                      value: TaskFilter.today,
+                      label: Text('Bugün'),
+                      icon: Icon(Icons.today),
+                    ),
+                    ButtonSegment(
+                      value: TaskFilter.done,
+                      label: Text('Tamamlanan'),
+                      icon: Icon(Icons.check_circle),
+                    ),
                   ],
                   selected: {_filter},
                   onSelectionChanged: (s) => setState(() => _filter = s.first),
@@ -142,7 +154,10 @@ class _HomePageState extends ConsumerState<HomePage> {
           // 3) Gruplama + sayaçlar
           final buckets = _bucketize(flatList);
           final counts = _countsFor(buckets);
-          final entries = _buildEntriesFromBuckets(buckets, collapsed: _collapsed);
+          final entries = _buildEntriesFromBuckets(
+            buckets,
+            collapsed: _collapsed,
+          );
 
           if (flatList.isEmpty) {
             // Boşken de aşağı çek–yenile çalışsın:
@@ -199,9 +214,9 @@ class _HomePageState extends ConsumerState<HomePage> {
       ),
       floatingActionButton: FloatingActionButton.extended(
         onPressed: () async {
-          await Navigator.of(context).push(
-            MaterialPageRoute(builder: (_) => const TaskEditPage()),
-          );
+          await Navigator.of(
+            context,
+          ).push(MaterialPageRoute(builder: (_) => const TaskEditPage()));
           if (context.mounted) {
             ref.read(taskListProvider.notifier).refresh();
           }
@@ -252,10 +267,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   Map<_SectionType, _Count> _countsFor(Map<_SectionType, List<Task>> buckets) {
     return {
       for (final e in buckets.entries)
-        e.key: _Count(
-          e.value.length,
-          e.value.where((t) => t.done).length,
-        )
+        e.key: _Count(e.value.length, e.value.where((t) => t.done).length),
     };
   }
 
@@ -297,7 +309,7 @@ class _HomePageState extends ConsumerState<HomePage> {
       case TaskFilter.done:
         return src.where((t) => t.done).toList();
       case TaskFilter.all:
-      return src;
+        return src;
     }
   }
 
@@ -340,7 +352,9 @@ class _HomePageState extends ConsumerState<HomePage> {
               leading: const Icon(Icons.alarm_add),
               title: const Text('1 saat ertele'),
               onTap: () async {
-                final due = (t.due ?? DateTime.now()).add(const Duration(hours: 1));
+                final due = (t.due ?? DateTime.now()).add(
+                  const Duration(hours: 1),
+                );
                 await _apply(t.copyWith(done: false, due: due));
                 if (context.mounted) Navigator.pop(context);
               },
@@ -349,7 +363,9 @@ class _HomePageState extends ConsumerState<HomePage> {
               leading: const Icon(Icons.schedule),
               title: const Text('3 saat ertele'),
               onTap: () async {
-                final due = (t.due ?? DateTime.now()).add(const Duration(hours: 3));
+                final due = (t.due ?? DateTime.now()).add(
+                  const Duration(hours: 3),
+                );
                 await _apply(t.copyWith(done: false, due: due));
                 if (context.mounted) Navigator.pop(context);
               },
@@ -387,7 +403,16 @@ class _HomePageState extends ConsumerState<HomePage> {
                 final hour = t.due?.hour ?? 9;
                 final minute = t.due?.minute ?? 0;
                 await _apply(
-                  t.copyWith(done: false, due: DateTime(nextMonth.year, nextMonth.month, nextMonth.day, hour, minute)),
+                  t.copyWith(
+                    done: false,
+                    due: DateTime(
+                      nextMonth.year,
+                      nextMonth.month,
+                      nextMonth.day,
+                      hour,
+                      minute,
+                    ),
+                  ),
                 );
                 if (context.mounted) Navigator.pop(context);
               },
@@ -431,7 +456,11 @@ class _HomePageState extends ConsumerState<HomePage> {
         final now = DateTime.now();
         final hour = t.due?.hour ?? 9;
         final minute = t.due?.minute ?? 0;
-        final tom = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
+        final tom = DateTime(
+          now.year,
+          now.month,
+          now.day,
+        ).add(const Duration(days: 1));
         return t.copyWith(
           done: false,
           due: DateTime(tom.year, tom.month, tom.day, hour, minute),
@@ -458,7 +487,7 @@ class _TaskRow extends StatelessWidget {
     final t = task;
 
     return Dismissible(
-      key: ValueKey<int>(t.id!),
+      key: ValueKey<String>(t.id!),
       direction: DismissDirection.horizontal,
 
       // Sil (sağdan sola), Tamamla/Geri Al (soldan sağa)
@@ -496,9 +525,9 @@ class _TaskRow extends StatelessWidget {
                     label: 'Geri Al',
                     onPressed: () async {
                       // Bu callback içinde context/State dispose olabilir; yalnızca provider çağırıyoruz.
-                      await ref.read(taskListProvider.notifier).add(
-                        removed.copyWith(id: null),
-                      );
+                      await ref
+                          .read(taskListProvider.notifier)
+                          .add(removed.copyWith(id: null));
                     },
                   ),
                 ),
@@ -554,11 +583,9 @@ class _TaskRow extends StatelessWidget {
         child: TaskTile(
           task: t,
           onTap: () {
-            Navigator.of(context).push(
-              MaterialPageRoute(
-                builder: (_) => TaskEditPage(initial: t),
-              ),
-            );
+            Navigator.of(
+              context,
+            ).push(MaterialPageRoute(builder: (_) => TaskEditPage(initial: t)));
           },
         ),
       ),
@@ -634,15 +661,23 @@ class _SectionHeader extends StatelessWidget {
                   child: Text(
                     _label,
                     style: Theme.of(context).textTheme.titleSmall?.copyWith(
-                          color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9),
-                          fontWeight: FontWeight.w600,
-                        ),
+                      color: Theme.of(
+                        context,
+                      ).textTheme.titleSmall?.color?.withOpacity(.9),
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
                 ),
                 // sayaç
-                Text('$done/$total', style: Theme.of(context).textTheme.labelMedium),
+                Text(
+                  '$done/$total',
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
                 const SizedBox(width: 8),
-                Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20),
+                Icon(
+                  collapsed ? Icons.expand_more : Icons.expand_less,
+                  size: 20,
+                ),
               ],
             ),
             if (showProgress) ...[
@@ -698,7 +733,10 @@ class _InlineSearchField extends StatelessWidget {
           borderRadius: BorderRadius.circular(14),
           borderSide: BorderSide(color: scheme.primary),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+        contentPadding: const EdgeInsets.symmetric(
+          horizontal: 12,
+          vertical: 12,
+        ),
       ),
     );
   }
@@ -728,8 +766,10 @@ class _EmptyState extends StatelessWidget {
               'Arama terimini değiştirin veya yeni bir görev ekleyin.',
               textAlign: TextAlign.center,
               style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: Theme.of(context).textTheme.bodyMedium?.color?.withOpacity(0.7),
-                  ),
+                color: Theme.of(
+                  context,
+                ).textTheme.bodyMedium?.color?.withOpacity(0.7),
+              ),
             ),
           ],
         ),

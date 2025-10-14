@@ -1,64 +1,116 @@
 // lib/providers/task_providers.dart
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:tasker/data/task_db.dart';
-import '../data/task_repository.dart';
+import 'package:tasker/src/ui/providers.dart';
+import '../data/task_repository.dart'; // Yeni Drift tabanlı repo
 import '../models/task.dart';
 
-/// DB provider
-final taskDbProvider = Provider<TaskDb>((ref) => TaskDb());
+// --------------- YENİ PROVIDER'LAR ---------------
 
+/// 📦 Drift AppDb provider'ı (lib/src/data/db.dart'tan geliyor)
+// final dbProvider = Provider<AppDb>((ref) => AppDb()); // (Zaten lib/src/ui/providers.dart'ta tanımlı)
+
+/// 🛠️ Task Repository (Drift'i kullanacak)
 final taskRepositoryProvider = Provider<TaskRepository>((ref) {
-  final db = ref.watch(taskDbProvider);
+  final db = ref.read(appDbProvider); // lib/src/data/db.dart'tan
   return TaskRepository(db);
 });
 
-/// Liste + arama + sıralama
-final taskListProvider =
-    AsyncNotifierProvider<TaskListNotifier, List<Task>>(TaskListNotifier.new);
+// --------------- TASK LİSTE NOTIFIER ---------------
+
+/// Liste + arama + sıralama (Stream'i yönetir)
+final taskListProvider = AsyncNotifierProvider<TaskListNotifier, List<Task>>(
+  TaskListNotifier.new,
+);
 
 class TaskListNotifier extends AsyncNotifier<List<Task>> {
   late final TaskRepository _repo;
+  StreamSubscription<List<Task>>? _streamSubscription;
 
   @override
   Future<List<Task>> build() async {
     _repo = ref.read(taskRepositoryProvider);
-    final items = await _repo.list();
-    return _sorted(items);
+
+    // Drift'ten gelen Stream'i dinle ve state'i güncelle
+    _streamSubscription = _repo.findAll().listen((items) {
+      state = AsyncData(_sorted(items));
+    });
+
+    // İlk veriyi bekle (başlangıç için)
+    final initialItems = await _repo.findAll().first;
+    return _sorted(initialItems);
   }
 
+  // Stream kullandığımız için artık 'refresh' metoduna gerek kalmadı.
+  // Ancak, arayüzdeki `RefreshIndicator` için bunu bırakalım.
   Future<void> refresh() async {
-    state = const AsyncLoading();
-    final items = await _repo.list();
+    // Stream zaten güncellemeleri dinlediği için bu metod sadece ilk listeyi bekler.
+    final items = await _repo.findAll().first;
     state = AsyncData(_sorted(items));
   }
 
   Future<void> add(Task t) async {
     await _repo.add(t);
-    await refresh();
+    // Stream otomatik güncelleyecek.
   }
 
   Future<void> updateTask(Task t) async {
     await _repo.update(t);
-    await refresh();
+    // Stream otomatik güncelleyecek.
   }
 
   Future<void> remove(Task t) async {
-    final repo = ref.read(taskRepositoryProvider);
-    await repo.delete(t.id!);
-    await refresh();
+    await _repo.delete(t.id!);
+    // Stream otomatik güncelleyecek.
   }
 
   /// home_page.dart’tan çağrılan toggle
   Future<void> toggle(Task t) async {
-    final repo = ref.read(taskRepositoryProvider);
-    final toggled = t.copyWith(done: !t.done);
-    await repo.update(toggled);
-    await refresh();
+    // Done durumunu tersine çevir
+    final toggled = t.copyWith(
+      done: !t.done,
+      // Tamamlanma/Geri alma durumunda sort'u manuel ayarlamak gerekebilir
+      // Ancak repo'daki sorgu sort'u yeniden hesapladığı için gerek yok.
+    );
+    await _repo.update(toggled);
+    // Stream otomatik güncelleyecek.
   }
 
-  /// Arama: başlık/nota göre filtrele, sonra kalıcı sıralamayı uygula
+  // ... (reorder metodu ve search metodu için TaskRepository'nin yeniden yazılması gerekiyor)
+
+  Future<void> reorder(int oldIndex, int newIndex) async {
+    // Mevcut (gruplanmamış/filtrelenmemiş) listeyi al
+    final list = state.value;
+    if (list == null) return;
+
+    // Yalnızca tamamlanmamış listeyi al ve üzerinde reorder yap
+    final undone = list.where((e) => !e.done).toList();
+
+    if (newIndex > undone.length) newIndex = undone.length;
+    if (newIndex > oldIndex) newIndex -= 1;
+
+    final moved = undone.removeAt(oldIndex);
+    undone.insert(newIndex, moved);
+
+    // Yeni sort değerlerini ata (0, 1000, 2000, ...)
+    for (var i = 0; i < undone.length; i++) {
+      // sort alanının int olması gerekiyor
+      undone[i] = undone[i].copyWith(sort: i * 1000, updatedAt: DateTime.now());
+    }
+
+    // Repository'ye toplu güncelleme gönder
+    await _repo.reorder(undone);
+    // Stream otomatik güncelleyecektir.
+  }
+
+  // Arama, in-memory (bellekte) değil, veritabanı sorgusu olarak yapılmalıdır.
+  // Basitlik için şimdilik in-memory filtrelemeyi koruyoruz:
   void search(String q) async {
-    final base = await _repo.list();
+    // Stream'i geçici olarak durdur.
+    _streamSubscription?.pause();
+
+    final base = await _repo.findAll().first; // Güncel tüm listeyi al
+
     final filtered = q.trim().isEmpty
         ? base
         : base.where((t) {
@@ -66,23 +118,24 @@ class TaskListNotifier extends AsyncNotifier<List<Task>> {
             return t.title.toLowerCase().contains(s) ||
                 (t.note ?? '').toLowerCase().contains(s);
           }).toList();
+
     state = AsyncData(_sorted(filtered));
+
+    // Arama bittiğinde stream'i tekrar başlat (eğer arama kutusu boşsa)
+    if (q.trim().isEmpty) {
+      _streamSubscription?.resume();
+    }
   }
 
-  Future<void> reorder(int oldIndex, int newIndex) async {
-    state = const AsyncLoading();
-    final list = await ref.read(taskRepositoryProvider).reorder(oldIndex, newIndex);
-    state = AsyncValue.data(_sorted(list)); // 👈 kalıcı sort’a göre yeniden sırala
-  }
-
-  // --- SIRALAMA KURALI (KALICI) ---
+  // --- SIRALAMA KURALI ---
   // 1) Tamamlanmamışlar önce
   // 2) Aynı grupta `sort` artan (DB’de saklanan sıra)
   List<Task> _sorted(List<Task> list) {
-    final sorted = [...list]..sort((a, b) {
-      if (a.done != b.done) return a.done ? 1 : -1;
-      return a.sort.compareTo(b.sort);
-    });
+    final sorted = [...list]
+      ..sort((a, b) {
+        if (a.done != b.done) return a.done ? 1 : -1;
+        return a.sort.compareTo(b.sort);
+      });
     return sorted;
   }
 }

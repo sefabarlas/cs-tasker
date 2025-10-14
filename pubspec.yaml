@@ -32,7 +32,6 @@ dependencies:
     sdk: flutter
   flutter_local_notifications: ^17.2.1
   timezone: ^0.9.2
-  sqflite: ^2.3.0
   flutter_native_timezone_updated_gradle: ^2.0.3
   riverpod: ^2.5.1
   flutter_riverpod: ^2.5.1

@@ -12,7 +12,9 @@ class NotificationService {
 
   /// Uygulama ilk açıldığında çağrılır.
   static Future<void> init() async {
-    final androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
+    final androidInit = const AndroidInitializationSettings(
+      '@mipmap/ic_launcher',
+    );
 
     // 👇 const KALDIRILDI — çünkü içindeki kategoriler const olamaz
     final darwinInit = DarwinInitializationSettings(
@@ -56,12 +58,16 @@ class NotificationService {
 
     // 🔔 Platform bazlı izinler
     if (Platform.isAndroid) {
-      final android = _flnp.resolvePlatformSpecificImplementation<
-          AndroidFlutterLocalNotificationsPlugin>();
+      final android = _flnp
+          .resolvePlatformSpecificImplementation<
+            AndroidFlutterLocalNotificationsPlugin
+          >();
       await android?.requestNotificationsPermission();
     } else if (Platform.isIOS || Platform.isMacOS) {
-      final darwin = _flnp.resolvePlatformSpecificImplementation<
-          IOSFlutterLocalNotificationsPlugin>();
+      final darwin = _flnp
+          .resolvePlatformSpecificImplementation<
+            IOSFlutterLocalNotificationsPlugin
+          >();
       await darwin?.requestPermissions(alert: true, badge: true, sound: true);
     }
   }
@@ -92,8 +98,11 @@ class NotificationService {
       presentSound: true,
     );
 
-    const details =
-        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+    const details = NotificationDetails(
+      android: android,
+      iOS: darwin,
+      macOS: darwin,
+    );
 
     await _flnp.show(id, title, body, details, payload: payload);
   }
@@ -102,7 +111,7 @@ class NotificationService {
   static Future<void> scheduleAt({
     required int id,
     required String title,
-    required String body,
+    required String? body,
     required tz.TZDateTime when,
     String? payload,
   }) async {
@@ -128,8 +137,11 @@ class NotificationService {
       categoryIdentifier: 'task_actions',
     );
 
-    final details =
-        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+    final details = NotificationDetails(
+      android: android,
+      iOS: darwin,
+      macOS: darwin,
+    );
 
     await _flnp.zonedSchedule(
       id,
@@ -149,7 +161,7 @@ class NotificationService {
   static Future<void> scheduleDaily({
     required int id,
     required String title,
-    required String body,
+    required String? body,
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
@@ -169,8 +181,11 @@ class NotificationService {
       categoryIdentifier: 'task_actions',
     );
 
-    final details =
-        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+    final details = NotificationDetails(
+      android: android,
+      iOS: darwin,
+      macOS: darwin,
+    );
 
     await _flnp.zonedSchedule(
       id,
@@ -190,7 +205,7 @@ class NotificationService {
   static Future<void> scheduleWeekly({
     required int id,
     required String title,
-    required String body,
+    required String? body,
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
@@ -210,8 +225,11 @@ class NotificationService {
       categoryIdentifier: 'task_actions',
     );
 
-    final details =
-        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+    final details = NotificationDetails(
+      android: android,
+      iOS: darwin,
+      macOS: darwin,
+    );
 
     await _flnp.zonedSchedule(
       id,
@@ -231,7 +249,7 @@ class NotificationService {
   static Future<void> scheduleMonthly({
     required int id,
     required String title,
-    required String body,
+    required String? body,
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
@@ -251,8 +269,11 @@ class NotificationService {
       categoryIdentifier: 'task_actions',
     );
 
-    final details =
-        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+    final details = NotificationDetails(
+      android: android,
+      iOS: darwin,
+      macOS: darwin,
+    );
 
     await _flnp.zonedSchedule(
       id,

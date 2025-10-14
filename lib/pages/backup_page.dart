@@ -30,7 +30,10 @@ class BackupPage extends ConsumerWidget {
       final file = File(res.files.single.path!);
 
       try {
-        final count = await backup.importFromJsonFile(file, replaceAll: replaceAll);
+        final count = await backup.importFromJsonFile(
+          file,
+          replaceAll: replaceAll,
+        );
         if (context.mounted) {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(content: Text('İçe aktarıldı: $count görev')),
@@ -40,9 +43,9 @@ class BackupPage extends ConsumerWidget {
         }
       } catch (e) {
         if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text('İçe aktarma hatası: $e')),
-          );
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('İçe aktarma hatası: $e')));
         }
       }
     }
@@ -53,7 +56,9 @@ class BackupPage extends ConsumerWidget {
         children: [
           const ListTile(
             title: Text('Dışa Aktar (JSON)'),
-            subtitle: Text('Tüm görevlerinizi JSON dosya olarak paylaşın/ kaydedin.'),
+            subtitle: Text(
+              'Tüm görevlerinizi JSON dosya olarak paylaşın/ kaydedin.',
+            ),
           ),
           ListTile(
             leading: const Icon(Icons.upload_file),
@@ -68,13 +73,17 @@ class BackupPage extends ConsumerWidget {
           ListTile(
             leading: const Icon(Icons.download),
             title: const Text('İçe aktar (Birleştir)'),
-            subtitle: const Text('Aynı id’ler güncellenir, yeni olanlar eklenir.'),
+            subtitle: const Text(
+              'Aynı id’ler güncellenir, yeni olanlar eklenir.',
+            ),
             onTap: () => _import(replaceAll: false),
           ),
           ListTile(
             leading: const Icon(Icons.restore),
             title: const Text('İçe aktar (Tümünü değiştir)'),
-            subtitle: const Text('Mevcut tüm görevler silinir, yedekten yüklenir.'),
+            subtitle: const Text(
+              'Mevcut tüm görevler silinir, yedekten yüklenir.',
+            ),
             onTap: () => _import(replaceAll: true),
           ),
         ],

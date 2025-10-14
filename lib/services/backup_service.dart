@@ -54,7 +54,7 @@ class BackupService {
       // merge: id eşleşirse update, yoksa ekle (sona)
       final existing = await repo.list();
       final existingById = {
-        for (final t in existing.where((e) => e.id != null)) t.id!: t
+        for (final t in existing.where((e) => e.id != null)) t.id!: t,
       };
       int imported = 0;
 

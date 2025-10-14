@@ -2,15 +2,13 @@
 enum RepeatRule { none, daily, weekly, monthly }
 
 class Task {
-  final int? id;
+  final String? id;
   final String title;
   final String? note;
   final DateTime? due;
   final RepeatRule repeat;
   final bool done;
   final int sort;
-
-  // 🆕 zaman damgaları
   final DateTime createdAt;
   final DateTime? updatedAt;
 
@@ -27,7 +25,7 @@ class Task {
   }) : createdAt = createdAt ?? DateTime.now();
 
   Task copyWith({
-    int? id,
+    String? id,
     String? title,
     String? note,
     DateTime? due,
@@ -52,25 +50,33 @@ class Task {
 
   static RepeatRule _repeatFromInt(int? v) {
     switch (v) {
-      case 1: return RepeatRule.daily;
-      case 2: return RepeatRule.weekly;
-      case 3: return RepeatRule.monthly;
-      default: return RepeatRule.none;
+      case 1:
+        return RepeatRule.daily;
+      case 2:
+        return RepeatRule.weekly;
+      case 3:
+        return RepeatRule.monthly;
+      default:
+        return RepeatRule.none;
     }
   }
 
   static int _repeatToInt(RepeatRule r) {
     switch (r) {
-      case RepeatRule.daily: return 1;
-      case RepeatRule.weekly: return 2;
-      case RepeatRule.monthly: return 3;
-      case RepeatRule.none: return 0;
+      case RepeatRule.daily:
+        return 1;
+      case RepeatRule.weekly:
+        return 2;
+      case RepeatRule.monthly:
+        return 3;
+      case RepeatRule.none:
+        return 0;
     }
   }
 
   factory Task.fromMap(Map<String, Object?> m) {
     return Task(
-      id: m['id'] as int?,
+      id: m['id'] as String?,
       title: m['title'] as String,
       note: m['note'] as String?,
       due: (m['due'] as int?) != null
@@ -102,10 +108,8 @@ class Task {
     };
   }
 
-    // ---- Export/Import JSON helpers (dosya için) ----
   Map<String, Object?> toExportJson() {
     return {
-      // id’yi isteğe bağlı koyuyoruz (başka cihaza taşırken gerekmez)
       'id': id,
       'title': title,
       'note': note,
@@ -119,27 +123,48 @@ class Task {
   static Task fromExportJson(Map<String, Object?> m) {
     RepeatRule _rep(String? s) {
       switch (s) {
-        case 'daily': return RepeatRule.daily;
-        case 'weekly': return RepeatRule.weekly;
-        case 'monthly': return RepeatRule.monthly;
-        default: return RepeatRule.none;
+        case 'daily':
+          return RepeatRule.daily;
+        case 'weekly':
+          return RepeatRule.weekly;
+        case 'monthly':
+          return RepeatRule.monthly;
+        default:
+          return RepeatRule.none;
       }
     }
 
-    DateTime? _parseDue(String? iso) {
+    DateTime? parseDue(String? iso) {
       if (iso == null || iso.isEmpty) return null;
       return DateTime.tryParse(iso);
     }
 
     return Task(
-      id: m['id'] as int?, // import sırasında yoksa null olabilir
+      id: m['id'] as String?,
       title: (m['title'] as String?) ?? '',
       note: m['note'] as String?,
-      due: _parseDue(m['due'] as String?),
+      due: parseDue(m['due'] as String?),
       repeat: _rep(m['repeat'] as String?),
       done: (m['done'] as bool?) ?? false,
       sort: (m['sort'] as int?) ?? 0,
     );
   }
 
+  static Task fromDrift(dynamic dTask) {
+    final repeatRule = _repeatFromInt(dTask.repeat as int?);
+
+    return Task(
+      id: dTask.id as String?,
+      title: dTask.title as String,
+      note: dTask.notes as String?,
+      due: (dTask.due as int?) != null
+          ? DateTime.fromMillisecondsSinceEpoch(dTask.due as int)
+          : null,
+      repeat: repeatRule,
+      done: dTask.done as bool,
+      sort: dTask.sort as int,
+      createdAt: dTask.createdAtUtc as DateTime,
+      updatedAt: dTask.updatedAtUtc as DateTime?,
+    );
+  }
 }

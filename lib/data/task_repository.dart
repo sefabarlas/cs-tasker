@@ -1,147 +1,229 @@
-// lib/data/task_repository.dart
-import 'package:timezone/timezone.dart' as tz;
+import 'package:drift/drift.dart' as d;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:tasker/src/ui/providers.dart';
+import 'package:uuid/uuid.dart';
+import 'dart:async';
 import '../models/task.dart';
+import '../src/data/db.dart' hide Task;
 import '../src/notifications/notification_service.dart';
-import '../data/task_db.dart';
+import 'package:timezone/timezone.dart' as tz;
+
+const _uuid = Uuid();
+
+// Repository'i sağlayan Riverpod Provider'ı güncellendi
+final taskRepositoryProvider = Provider<TaskRepository>((ref) {
+  final db = ref.read(appDbProvider);
+  return TaskRepository(db);
+});
 
 class TaskRepository {
-  final TaskDb _db;
+  final AppDb _db;
+
   TaskRepository(this._db);
 
-  Future<List<Task>> list() => _db.getAll();
-  Future<Task?> getById(int id) => _db.getById(id);
+  Stream<List<Task>> findAll() {
+    final query = _db.select(_db.tasks)
+      ..orderBy([
+        (t) => d.OrderingTerm(
+          expression: _db.tasks.done.cast<int>(d.DriftSqlType.int),
+          mode: d.OrderingMode.asc,
+        ),
 
-  Future<void> add(Task t) async {
-    // yeni not-done görevlerin sort'u listenin sonuna: index*1000
-    final allItems = await _db.getAll();
-    final lastIndex = allItems.where((e) => !e.done).length;
+        (t) => d.OrderingTerm(
+          expression: _db.tasks.sort,
+          mode: d.OrderingMode.asc,
+        ),
+      ]);
+    return query.watch().map((driftTasks) {
+      return driftTasks.map((driftTask) => Task.fromDrift(driftTask)).toList();
+    });
+  }
 
-    final now = DateTime.now();
-    final toInsert = t.copyWith(
-      sort: lastIndex * 1000,
-      createdAt: now,           // 🆕 oluşturulma zamanı
-      updatedAt: null,          // ilk eklemede yok
+  Future<List<Task>> list() => findAll().first;
+
+  Future<Task?> getById(String id) async {
+    final query = _db.select(_db.tasks)..where((t) => t.id.equals(id));
+    final result = await query.getSingleOrNull();
+    return result != null ? Task.fromDrift(result) : null;
+  }
+
+  Future<String> add(Task task) async {
+    final id = _uuid.v4();
+    final now = DateTime.now().toUtc();
+
+    // En son sıraya eklemek için sort değerini bul (undone görevler için)
+    final lastSort =
+        await (_db.select(_db.tasks)
+              ..where((t) => t.done.equals(false))
+              ..orderBy([
+                (t) => d.OrderingTerm(
+                  expression: _db.tasks.sort,
+                  mode: d.OrderingMode.desc,
+                ),
+              ])
+              ..limit(1))
+            .map((row) => row.sort)
+            .getSingleOrNull();
+
+    final nextSort = (lastSort ?? 0) + 1000;
+
+    final companion = TasksCompanion.insert(
+      id: id,
+      title: task.title,
+      notes: d.Value(task.note),
+      done: d.Value(task.done),
+      due: d.Value(task.due?.millisecondsSinceEpoch), // DateTime -> int
+      repeat: d.Value(task.repeat.index),
+      sort: d.Value(nextSort),
+      createdAtUtc: now,
+      updatedAtUtc: d.Value(null),
     );
 
-    final id = await _db.insert(toInsert);
-    await _rescheduleNotificationForTask(toInsert.copyWith(id: id));
+    await _db.into(_db.tasks).insert(companion);
+
+    final newTask = task.copyWith(id: id);
+    _rescheduleNotificationForTask(newTask);
+
+    return id;
   }
 
-  Future<void> update(Task t) async {
+  Future<bool> update(Task task) async {
+    if (task.id == null) return false;
+    final now = DateTime.now().toUtc();
+
+    final companion = TasksCompanion(
+      id: d.Value(task.id!),
+      title: d.Value(task.title),
+      notes: d.Value(task.note),
+      done: d.Value(task.done),
+      due: d.Value(task.due?.millisecondsSinceEpoch),
+      repeat: d.Value(task.repeat.index),
+      sort: d.Value(task.sort),
+      updatedAtUtc: d.Value(now),
+    );
+
+    final count = await (_db.update(
+      _db.tasks,
+    )..where((t) => t.id.equals(task.id!))).write(companion);
+
+    _rescheduleNotificationForTask(task);
+
+    return count == 1;
+  }
+
+  Future<int> delete(String id) async {
+    final count = await (_db.delete(
+      _db.tasks,
+    )..where((t) => t.id.equals(id))).go();
+
+    final notificationId = int.tryParse(id) ?? id.hashCode;
+    NotificationService.cancel(notificationId);
+
+    return count;
+  }
+
+  Future<int> deleteModel(Task t) async {
+    if (t.id == null) return 0;
+    return delete(t.id!);
+  }
+
+  Future<void> deleteAll() async {
+    await _db.delete(_db.tasks).go();
+  }
+
+  Future<void> reorder(List<Task> tasks) async {
+    await _db.transaction(() async {
+      for (final task in tasks) {
+        if (!task.done && task.id != null) {
+          await (_db.update(_db.tasks)..where((t) => t.id.equals(task.id!)))
+              .write(TasksCompanion(sort: d.Value(task.sort)));
+        }
+      }
+    });
+  }
+
+  /// Görevin durumuna göre bildirimleri yeniden planlar veya iptal eder.
+  void _rescheduleNotificationForTask(Task task) {
+    if (task.id == null) return;
+
+    final notificationId = int.tryParse(task.id!) ?? task.id.hashCode;
+
+    if (task.due == null || task.done) {
+      NotificationService.cancel(notificationId);
+      return;
+    }
+
+    DateTime due = task.due!;
     final now = DateTime.now();
-    final toSave = t.copyWith(updatedAt: now); // 🆕 güncellenme zamanı
-    await _db.update(toSave);
-    await _rescheduleNotificationForTask(toSave);
-  }
+    bool shouldReschedule = false;
 
-  Future<void> delete(int id) async {
-    await _db.delete(id);
-    await NotificationService.cancel(id); // planlanmış hatırlatmayı da kaldır
-  }
-
-    Future<void> deleteAll() async {
-    final list = await _db.getAll();
-    for (final t in list) {
-      await _db.delete(t.id!);
-    }
-  }
-
-  Future<void> addMany(List<Task> tasks) async {
-    for (final t in tasks) {
-      await _db.insert(t);
-    }
-  }
-
-  /// Sürükleyerek sıralama: sadece tamamlanmamış listede çalışır.
-  Future<List<Task>> reorder(int oldIndex, int newIndex) async {
-    final items = await _db.getAll();
-    final undone = items.where((e) => !e.done).toList();
-    if (newIndex > undone.length) newIndex = undone.length;
-    if (newIndex > oldIndex) newIndex -= 1;
-
-    final moved = undone.removeAt(oldIndex);
-    undone.insert(newIndex, moved);
-
-    for (var i = 0; i < undone.length; i++) {
-      undone[i] = undone[i].copyWith(sort: i * 1000, updatedAt: DateTime.now());
-    }
-
-    await _db.updateMany(undone);
-    return _db.getAll();
-  }
-
-  /// Bildirim planlama/iptal mantığını tek yerde topluyoruz.
-  Future<void> _rescheduleNotificationForTask(Task t) async {
-    if (t.id != null) {
-      await NotificationService.cancel(t.id!);
-    }
-
-    if (t.id == null || t.done || t.due == null) return;
-
-    final now = DateTime.now();
-    DateTime due = t.due!;
-    if (!due.isAfter(now)) {
-      switch (t.repeat) {
-        case RepeatRule.daily:
-          while (!due.isAfter(now)) {
+    // Eğer bitiş tarihi geçmişse ve tekrar kuralı varsa, tarihi ileri al
+    if (due.isBefore(now) && task.repeat != RepeatRule.none) {
+      while (due.isBefore(now)) {
+        switch (task.repeat) {
+          case RepeatRule.daily:
             due = due.add(const Duration(days: 1));
-          }
-          break;
-        case RepeatRule.weekly:
-          while (!due.isAfter(now)) {
+            break;
+          case RepeatRule.weekly:
             due = due.add(const Duration(days: 7));
-          }
-          break;
-        case RepeatRule.monthly:
-          while (!due.isAfter(now)) {
-            due = DateTime(due.year, due.month + 1, due.day, due.hour, due.minute);
-          }
-          break;
-        case RepeatRule.none:
-          return;
+            break;
+          case RepeatRule.monthly:
+            // Ay sonu sorunlarını ele al
+            due = DateTime(
+              due.year,
+              due.month + 1,
+              due.day,
+              due.hour,
+              due.minute,
+            );
+            break;
+          case RepeatRule.none:
+            break; // should not happen
+        }
+        shouldReschedule = true;
       }
     }
 
-    final when = tz.TZDateTime.from(due, tz.local);
-    final title = 'Görev: ${t.title}';
-    final body = (t.note?.isNotEmpty ?? false) ? t.note! : 'Hatırlatma zamanı geldi.';
-    final payload = 'taskId:${t.id}';
+    if (shouldReschedule) {
+      // Tarih ileri alındıysa, update metodu zaten reschedule'ı tekrar çağıracak.
+      update(task.copyWith(due: due));
+      return;
+    }
 
-    switch (t.repeat) {
+    final tzWhen = tz.TZDateTime.from(due, tz.local);
+
+    // Normal planlama
+    switch (task.repeat) {
       case RepeatRule.none:
-        await NotificationService.scheduleAt(
-          id: t.id!,
-          title: title,
-          body: body,
-          when: when,
-          payload: payload,
+        NotificationService.scheduleAt(
+          id: notificationId,
+          title: task.title,
+          body: task.note,
+          when: tzWhen,
         );
         break;
       case RepeatRule.daily:
-        await NotificationService.scheduleDaily(
-          id: t.id!,
-          title: title,
-          body: body,
-          firstTime: when,
-          payload: payload,
+        NotificationService.scheduleDaily(
+          id: notificationId,
+          title: task.title,
+          body: task.note,
+          firstTime: tzWhen,
         );
         break;
       case RepeatRule.weekly:
-        await NotificationService.scheduleWeekly(
-          id: t.id!,
-          title: title,
-          body: body,
-          firstTime: when,
-          payload: payload,
+        NotificationService.scheduleWeekly(
+          id: notificationId,
+          title: task.title,
+          body: task.note,
+          firstTime: tzWhen,
         );
         break;
       case RepeatRule.monthly:
-        await NotificationService.scheduleMonthly(
-          id: t.id!,
-          title: title,
-          body: body,
-          firstTime: when,
-          payload: payload,
+        NotificationService.scheduleMonthly(
+          id: notificationId,
+          title: task.title,
+          body: task.note,
+          firstTime: tzWhen,
         );
         break;
     }

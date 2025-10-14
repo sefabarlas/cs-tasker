@@ -1,0 +1,4367 @@
+-lib/constants/app_info.dart
+
+// lib/constants/app_info.dart
+/// 📦 Uygulama genel sabitleri
+
+/// Uygulama adı (tüm platformlarda görünür)
+const String appName = 'CS Tasker';
+
+/// Sürüm bilgisi (manuel veya pubspec.yaml ile senkronize edilebilir)
+const String appVersion = '1.0.0';
+
+/// Paket adı (Android ve iOS bundle identifier)
+const String appPackage = 'com.example.cstasker';
+
+/// Uygulama açıklaması (App Store / Play Store için de kullanılabilir)
+const String appDescription =
+    'CS Tasker, görevlerinizi düzenlemenizi, hatırlatıcılar ayarlamanızı ve verimli çalışmanızı sağlayan sade ve modern bir görev yöneticisidir.';
+
+const String appAuthor = 'Sefa Barlas';
+
+const String appAuthorContact = 'sefabarlass@gmail.com';
+
+const String appReleaseChannel = 'stable';
+
+------------------------------------------------------
+
+-lib/data/task_db.dart
+
+// lib/data/task_db.dart
+import 'package:sqflite/sqflite.dart';
+import '../models/task.dart';
+
+class TaskDb {
+  Database? _db;
+
+  Future<Database> open() async {
+    _db ??= await openDatabase(
+      'tasker.db',
+      version: 6, // şema versiyonu
+      onCreate: (db, v) async {
+        await db.execute('''
+          CREATE TABLE tasks(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            title TEXT NOT NULL,
+            note TEXT,
+            due INTEGER,
+            repeat INTEGER NOT NULL DEFAULT 0,
+            done INTEGER NOT NULL DEFAULT 0,
+            sort INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER
+          )
+        ''');
+      },
+      onUpgrade: (db, oldV, newV) async {
+        // v2: sort sütunu
+        if (oldV < 2) {
+          try {
+            await db.execute('ALTER TABLE tasks ADD COLUMN sort INTEGER NOT NULL DEFAULT 0');
+          } catch (_) {}
+          final rows = await db.query('tasks', orderBy: 'done ASC, due ASC');
+          int i = 0, j = 0;
+          for (final m in rows) {
+            final done = (m['done'] as int? ?? 0) == 1;
+            final id = m['id'] as int;
+            final val = done ? (1000000000 + (j++)) : (i++ * 1000);
+            await db.update('tasks', {'sort': val}, where: 'id=?', whereArgs: [id]);
+          }
+        }
+
+        // v6: created_at ve updated_at sütunları
+        if (oldV < 6) {
+          try {
+            await db.execute('ALTER TABLE tasks ADD COLUMN created_at INTEGER');
+          } catch (_) {}
+          try {
+            await db.execute('ALTER TABLE tasks ADD COLUMN updated_at INTEGER');
+          } catch (_) {}
+
+          // created_at boş olanları "şimdi" ile doldur
+          final now = DateTime.now().millisecondsSinceEpoch;
+          await db.update('tasks', {'created_at': now}, where: 'created_at IS NULL');
+        }
+      },
+    );
+    return _db!;
+  }
+
+  Future<Database> _ensureOpen() async {
+    if (_db == null || !_db!.isOpen) {
+      return await open();
+    }
+    return _db!;
+  }
+
+  Future<List<Task>> getAll() async {
+    final db = await _ensureOpen();
+    final rows = await db.query(
+      'tasks',
+      orderBy: 'done ASC, sort ASC',
+    );
+    return rows.map(Task.fromMap).toList();
+  }
+
+  Future<Task?> getById(int id) async {
+    final db = await _ensureOpen();
+    final rows = await db.query('tasks', where: 'id=?', whereArgs: [id], limit: 1);
+    if (rows.isEmpty) return null;
+    return Task.fromMap(rows.first);
+  }
+
+  Future<int> insert(Task t) async {
+    final db = await _ensureOpen();
+    return await db.insert('tasks', t.toMap());
+  }
+
+  Future<int> update(Task t) async {
+    final db = await _ensureOpen();
+    return await db.update('tasks', t.toMap(), where: 'id=?', whereArgs: [t.id]);
+  }
+
+  Future<int> delete(int id) async {
+    final db = await _ensureOpen();
+    return await db.delete('tasks', where: 'id=?', whereArgs: [id]);
+  }
+
+  Future<void> updateMany(List<Task> tasks) async {
+    final db = await _ensureOpen();
+    final batch = db.batch();
+    for (final t in tasks) {
+      batch.update('tasks', t.toMap(), where: 'id=?', whereArgs: [t.id]);
+    }
+    await batch.commit(noResult: true);
+  }
+}
+
+------------------------------------------------------
+
+-lib/data/task_repository.dart
+
+// lib/data/task_repository.dart
+import 'package:timezone/timezone.dart' as tz;
+import '../models/task.dart';
+import '../src/notifications/notification_service.dart';
+import '../data/task_db.dart';
+
+class TaskRepository {
+  final TaskDb _db;
+  TaskRepository(this._db);
+
+  Future<List<Task>> list() => _db.getAll();
+  Future<Task?> getById(int id) => _db.getById(id);
+
+  Future<void> add(Task t) async {
+    // yeni not-done görevlerin sort'u listenin sonuna: index*1000
+    final allItems = await _db.getAll();
+    final lastIndex = allItems.where((e) => !e.done).length;
+
+    final now = DateTime.now();
+    final toInsert = t.copyWith(
+      sort: lastIndex * 1000,
+      createdAt: now,           // 🆕 oluşturulma zamanı
+      updatedAt: null,          // ilk eklemede yok
+    );
+
+    final id = await _db.insert(toInsert);
+    await _rescheduleNotificationForTask(toInsert.copyWith(id: id));
+  }
+
+  Future<void> update(Task t) async {
+    final now = DateTime.now();
+    final toSave = t.copyWith(updatedAt: now); // 🆕 güncellenme zamanı
+    await _db.update(toSave);
+    await _rescheduleNotificationForTask(toSave);
+  }
+
+  Future<void> delete(int id) async {
+    await _db.delete(id);
+    await NotificationService.cancel(id); // planlanmış hatırlatmayı da kaldır
+  }
+
+    Future<void> deleteAll() async {
+    final list = await _db.getAll();
+    for (final t in list) {
+      await _db.delete(t.id!);
+    }
+  }
+
+  Future<void> addMany(List<Task> tasks) async {
+    for (final t in tasks) {
+      await _db.insert(t);
+    }
+  }
+
+  /// Sürükleyerek sıralama: sadece tamamlanmamış listede çalışır.
+  Future<List<Task>> reorder(int oldIndex, int newIndex) async {
+    final items = await _db.getAll();
+    final undone = items.where((e) => !e.done).toList();
+    if (newIndex > undone.length) newIndex = undone.length;
+    if (newIndex > oldIndex) newIndex -= 1;
+
+    final moved = undone.removeAt(oldIndex);
+    undone.insert(newIndex, moved);
+
+    for (var i = 0; i < undone.length; i++) {
+      undone[i] = undone[i].copyWith(sort: i * 1000, updatedAt: DateTime.now());
+    }
+
+    await _db.updateMany(undone);
+    return _db.getAll();
+  }
+
+  /// Bildirim planlama/iptal mantığını tek yerde topluyoruz.
+  Future<void> _rescheduleNotificationForTask(Task t) async {
+    if (t.id != null) {
+      await NotificationService.cancel(t.id!);
+    }
+
+    if (t.id == null || t.done || t.due == null) return;
+
+    final now = DateTime.now();
+    DateTime due = t.due!;
+    if (!due.isAfter(now)) {
+      switch (t.repeat) {
+        case RepeatRule.daily:
+          while (!due.isAfter(now)) {
+            due = due.add(const Duration(days: 1));
+          }
+          break;
+        case RepeatRule.weekly:
+          while (!due.isAfter(now)) {
+            due = due.add(const Duration(days: 7));
+          }
+          break;
+        case RepeatRule.monthly:
+          while (!due.isAfter(now)) {
+            due = DateTime(due.year, due.month + 1, due.day, due.hour, due.minute);
+          }
+          break;
+        case RepeatRule.none:
+          return;
+      }
+    }
+
+    final when = tz.TZDateTime.from(due, tz.local);
+    final title = 'Görev: ${t.title}';
+    final body = (t.note?.isNotEmpty ?? false) ? t.note! : 'Hatırlatma zamanı geldi.';
+    final payload = 'taskId:${t.id}';
+
+    switch (t.repeat) {
+      case RepeatRule.none:
+        await NotificationService.scheduleAt(
+          id: t.id!,
+          title: title,
+          body: body,
+          when: when,
+          payload: payload,
+        );
+        break;
+      case RepeatRule.daily:
+        await NotificationService.scheduleDaily(
+          id: t.id!,
+          title: title,
+          body: body,
+          firstTime: when,
+          payload: payload,
+        );
+        break;
+      case RepeatRule.weekly:
+        await NotificationService.scheduleWeekly(
+          id: t.id!,
+          title: title,
+          body: body,
+          firstTime: when,
+          payload: payload,
+        );
+        break;
+      case RepeatRule.monthly:
+        await NotificationService.scheduleMonthly(
+          id: t.id!,
+          title: title,
+          body: body,
+          firstTime: when,
+          payload: payload,
+        );
+        break;
+    }
+  }
+}
+
+------------------------------------------------------
+
+-lib/models/task.dart
+
+// lib/models/task.dart
+enum RepeatRule { none, daily, weekly, monthly }
+
+class Task {
+  final int? id;
+  final String title;
+  final String? note;
+  final DateTime? due;
+  final RepeatRule repeat;
+  final bool done;
+  final int sort;
+
+  // 🆕 zaman damgaları
+  final DateTime createdAt;
+  final DateTime? updatedAt;
+
+  Task({
+    this.id,
+    required this.title,
+    this.note,
+    this.due,
+    this.repeat = RepeatRule.none,
+    this.done = false,
+    this.sort = 0,
+    DateTime? createdAt,
+    this.updatedAt,
+  }) : createdAt = createdAt ?? DateTime.now();
+
+  Task copyWith({
+    int? id,
+    String? title,
+    String? note,
+    DateTime? due,
+    RepeatRule? repeat,
+    bool? done,
+    int? sort,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+  }) {
+    return Task(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      note: note ?? this.note,
+      due: due ?? this.due,
+      repeat: repeat ?? this.repeat,
+      done: done ?? this.done,
+      sort: sort ?? this.sort,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+    );
+  }
+
+  static RepeatRule _repeatFromInt(int? v) {
+    switch (v) {
+      case 1: return RepeatRule.daily;
+      case 2: return RepeatRule.weekly;
+      case 3: return RepeatRule.monthly;
+      default: return RepeatRule.none;
+    }
+  }
+
+  static int _repeatToInt(RepeatRule r) {
+    switch (r) {
+      case RepeatRule.daily: return 1;
+      case RepeatRule.weekly: return 2;
+      case RepeatRule.monthly: return 3;
+      case RepeatRule.none: return 0;
+    }
+  }
+
+  factory Task.fromMap(Map<String, Object?> m) {
+    return Task(
+      id: m['id'] as int?,
+      title: m['title'] as String,
+      note: m['note'] as String?,
+      due: (m['due'] as int?) != null
+          ? DateTime.fromMillisecondsSinceEpoch(m['due'] as int)
+          : null,
+      repeat: _repeatFromInt(m['repeat'] as int?),
+      done: (m['done'] as int? ?? 0) == 1,
+      sort: m['sort'] as int? ?? 0,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(
+        (m['created_at'] as int?) ?? DateTime.now().millisecondsSinceEpoch,
+      ),
+      updatedAt: (m['updated_at'] as int?) != null
+          ? DateTime.fromMillisecondsSinceEpoch(m['updated_at'] as int)
+          : null,
+    );
+  }
+
+  Map<String, Object?> toMap() {
+    return {
+      'id': id,
+      'title': title,
+      'note': note,
+      'due': due?.millisecondsSinceEpoch,
+      'repeat': _repeatToInt(repeat),
+      'done': done ? 1 : 0,
+      'sort': sort,
+      'created_at': createdAt.millisecondsSinceEpoch,
+      'updated_at': updatedAt?.millisecondsSinceEpoch,
+    };
+  }
+
+    // ---- Export/Import JSON helpers (dosya için) ----
+  Map<String, Object?> toExportJson() {
+    return {
+      // id’yi isteğe bağlı koyuyoruz (başka cihaza taşırken gerekmez)
+      'id': id,
+      'title': title,
+      'note': note,
+      'due': due?.toIso8601String(),
+      'repeat': repeat.name, // "none", "daily", "weekly", "monthly"
+      'done': done,
+      'sort': sort,
+    };
+  }
+
+  static Task fromExportJson(Map<String, Object?> m) {
+    RepeatRule _rep(String? s) {
+      switch (s) {
+        case 'daily': return RepeatRule.daily;
+        case 'weekly': return RepeatRule.weekly;
+        case 'monthly': return RepeatRule.monthly;
+        default: return RepeatRule.none;
+      }
+    }
+
+    DateTime? _parseDue(String? iso) {
+      if (iso == null || iso.isEmpty) return null;
+      return DateTime.tryParse(iso);
+    }
+
+    return Task(
+      id: m['id'] as int?, // import sırasında yoksa null olabilir
+      title: (m['title'] as String?) ?? '',
+      note: m['note'] as String?,
+      due: _parseDue(m['due'] as String?),
+      repeat: _rep(m['repeat'] as String?),
+      done: (m['done'] as bool?) ?? false,
+      sort: (m['sort'] as int?) ?? 0,
+    );
+  }
+
+}
+
+------------------------------------------------------
+
+-lib/pages/about_page.dart
+
+import 'package:flutter/material.dart';
+import '../constants/app_info.dart';
+
+class AboutPage extends StatelessWidget {
+  const AboutPage({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Hakkında'),
+      ),
+      body: ListView(
+        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        children: [
+          Center(
+            child: Column(
+              children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(24),
+                  child: Image.asset(
+                    'assets/icon/app_icon.png',
+                    width: 96,
+                    height: 96,
+                  ),
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  appName,
+                  style: theme.textTheme.headlineSmall?.copyWith(
+                    fontWeight: FontWeight.bold,
+                    color: scheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'v$appVersion',
+                  style: theme.textTheme.labelMedium?.copyWith(
+                    color: scheme.outline,
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          const SizedBox(height: 32),
+
+          // 🔸 Açıklama
+          Text(
+            appDescription,
+            style: theme.textTheme.bodyMedium?.copyWith(
+              height: 1.4,
+              color: scheme.onSurfaceVariant,
+            ),
+          ),
+
+          const SizedBox(height: 32),
+          const Divider(),
+
+          // 🔸 Ek bilgiler
+          ListTile(
+            leading: const Icon(Icons.person_outline),
+            title: const Text('Geliştirici'),
+            subtitle: const Text(appAuthor),
+          ),
+          ListTile(
+            leading: const Icon(Icons.verified_user_outlined),
+            title: const Text('Sürüm'),
+            subtitle: Text(appVersion),
+          ),
+          ListTile(
+            leading: const Icon(Icons.policy_outlined),
+            title: const Text('Gizlilik Politikası'),
+            onTap: () {
+              showDialog(
+                context: context,
+                builder: (_) => AlertDialog(
+                  title: const Text('Gizlilik Politikası'),
+                  content: const Text(
+                    'CS Tasker kişisel verilerinizi toplamaz veya üçüncü taraflarla paylaşmaz. '
+                    'Veriler yalnızca cihazınızda saklanır.',
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: () => Navigator.pop(context),
+                      child: const Text('Kapat'),
+                    ),
+                  ],
+                ),
+              );
+            },
+          ),
+          ListTile(
+            leading: const Icon(Icons.email_outlined),
+            title: const Text('İletişim'),
+            subtitle: const Text(appAuthorContact),
+          ),
+
+          const SizedBox(height: 24),
+          Center(
+            child: Text(
+              '© ${DateTime.now().year} CS Software',
+              style: theme.textTheme.labelSmall?.copyWith(
+                color: scheme.outline,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+------------------------------------------------------
+
+-lib/pages/backup_page.dart
+
+import 'dart:io';
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
+import '../providers/task_providers.dart';
+import '../services/backup_service.dart';
+
+class BackupPage extends ConsumerWidget {
+  const BackupPage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final repo = ref.read(taskRepositoryProvider);
+    final backup = BackupService(repo);
+
+    Future<void> _export() async {
+      final file = await backup.exportToJsonFile();
+      await Share.shareXFiles([XFile(file.path)], text: 'CS Tasker yedeği');
+    }
+
+    Future<void> _import({required bool replaceAll}) async {
+      final res = await FilePicker.platform.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: ['json'],
+        allowMultiple: false,
+      );
+      if (res == null || res.files.single.path == null) return;
+
+      final file = File(res.files.single.path!);
+
+      try {
+        final count = await backup.importFromJsonFile(file, replaceAll: replaceAll);
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('İçe aktarıldı: $count görev')),
+          );
+          // listeyi tazele
+          await ref.read(taskListProvider.notifier).refresh();
+        }
+      } catch (e) {
+        if (context.mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('İçe aktarma hatası: $e')),
+          );
+        }
+      }
+    }
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Yedekleme / Geri Yükleme')),
+      body: ListView(
+        children: [
+          const ListTile(
+            title: Text('Dışa Aktar (JSON)'),
+            subtitle: Text('Tüm görevlerinizi JSON dosya olarak paylaşın/ kaydedin.'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.upload_file),
+            title: const Text('Yedek dosyası oluştur ve paylaş'),
+            onTap: _export,
+          ),
+          const Divider(),
+          const ListTile(
+            title: Text('İçe Aktar (JSON)'),
+            subtitle: Text('Yedek dosyasından görevleri geri yükleyin.'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.download),
+            title: const Text('İçe aktar (Birleştir)'),
+            subtitle: const Text('Aynı id’ler güncellenir, yeni olanlar eklenir.'),
+            onTap: () => _import(replaceAll: false),
+          ),
+          ListTile(
+            leading: const Icon(Icons.restore),
+            title: const Text('İçe aktar (Tümünü değiştir)'),
+            subtitle: const Text('Mevcut tüm görevler silinir, yedekten yüklenir.'),
+            onTap: () => _import(replaceAll: true),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+------------------------------------------------------
+
+-lib/pages/home_page.dart
+
+// lib/pages/home_page.dart
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:tasker/pages/about_page.dart';
+import 'package:tasker/pages/backup_page.dart';
+import '../models/task.dart';
+import '../providers/task_providers.dart';
+import 'task_edit_page.dart';
+import '../widgets/task_tile.dart';
+
+enum TaskFilter { all, today, done }
+
+/* ---------- Grup tipi ve görünür liste girdisi ---------- */
+
+enum _SectionType { today, tomorrow, later, done }
+
+class _Entry {
+  const _Entry.header(this.section) : task = null;
+  const _Entry.task(this.task) : section = null;
+
+  final _SectionType? section;
+  final Task? task;
+
+  bool get isHeader => section != null;
+  bool get isTask => task != null;
+}
+
+class HomePage extends ConsumerStatefulWidget {
+  const HomePage({super.key});
+  @override
+  ConsumerState<HomePage> createState() => _HomePageState();
+}
+
+class _HomePageState extends ConsumerState<HomePage> {
+  TaskFilter _filter = TaskFilter.all;
+
+  // 🔎 Kalıcı arama
+  final _searchCtl = TextEditingController();
+  String _query = '';
+
+  // 🔽 Bölüm daraltma durumları (Done varsayılan kapalı)
+  final Map<_SectionType, bool> _collapsed = {
+    _SectionType.today: false,
+    _SectionType.tomorrow: false,
+    _SectionType.later: false,
+    _SectionType.done: true,
+  };
+
+  @override
+  void initState() {
+    super.initState();
+    _searchCtl.addListener(() {
+      setState(() => _query = _searchCtl.text.trim());
+    });
+  }
+
+  @override
+  void dispose() {
+    _searchCtl.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final asyncList = ref.watch(taskListProvider);
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Görevler'),
+        centerTitle: false,
+        actions: [
+          IconButton(
+            tooltip: 'Hakkında',
+            icon: const Icon(Icons.info_outline),
+            onPressed: () {
+              Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const AboutPage()),
+              );
+            },
+          ),
+          PopupMenuButton<String>(
+            onSelected: (v) async {
+              if (v == 'backup') {
+                if (!context.mounted) return;
+                Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const BackupPage()),
+                );
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(
+                value: 'backup',
+                child: Text('Yedekle / Geri Yükle'),
+              ),
+            ],
+          ),
+        ],
+        bottom: PreferredSize(
+          preferredSize: const Size.fromHeight(112),
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+            child: Column(
+              children: [
+                // 🗂️ Filtreler
+                SegmentedButton<TaskFilter>(
+                  segments: const [
+                    ButtonSegment(value: TaskFilter.all, label: Text('Tümü'), icon: Icon(Icons.list_alt)),
+                    ButtonSegment(value: TaskFilter.today, label: Text('Bugün'), icon: Icon(Icons.today)),
+                    ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
+                  ],
+                  selected: {_filter},
+                  onSelectionChanged: (s) => setState(() => _filter = s.first),
+                ),
+                const SizedBox(height: 10),
+                // 🔎 Arama çubuğu
+                _InlineSearchField(controller: _searchCtl),
+              ],
+            ),
+          ),
+        ),
+      ),
+      body: asyncList.when(
+        loading: () => const Center(child: CircularProgressIndicator()),
+        error: (e, _) => RefreshIndicator(
+          onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
+          child: ListView(
+            physics: const AlwaysScrollableScrollPhysics(),
+            children: [
+              const SizedBox(height: 80),
+              Center(child: Text('Hata: $e')),
+              const SizedBox(height: 200),
+            ],
+          ),
+        ),
+        data: (items) {
+          // 1) Filtre
+          final filtered = _applyFilter(items, _filter);
+          // 2) Arama
+          final flatList = _applySearch(filtered, _query);
+
+          // 3) Gruplama + sayaçlar
+          final buckets = _bucketize(flatList);
+          final counts = _countsFor(buckets);
+          final entries = _buildEntriesFromBuckets(buckets, collapsed: _collapsed);
+
+          if (flatList.isEmpty) {
+            // Boşken de aşağı çek–yenile çalışsın:
+            return RefreshIndicator(
+              onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
+              child: ListView(
+                physics: const AlwaysScrollableScrollPhysics(),
+                children: const [
+                  SizedBox(height: 40),
+                  _EmptyState(),
+                  SizedBox(height: 200),
+                ],
+              ),
+            );
+          }
+
+          return RefreshIndicator(
+            onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
+            child: ListView.builder(
+              physics: const AlwaysScrollableScrollPhysics(),
+              padding: const EdgeInsets.only(bottom: 100),
+              itemCount: entries.length,
+              itemBuilder: (context, index) {
+                final e = entries[index];
+
+                if (e.isHeader) {
+                  final section = e.section!;
+                  final c = counts[section]!;
+                  final collapsed = _collapsed[section] ?? false;
+
+                  return KeyedSubtree(
+                    key: ValueKey('hdr_${section.name}'),
+                    child: _SectionHeader(
+                      section: section,
+                      total: c.total,
+                      done: c.done,
+                      collapsed: collapsed,
+                      onToggle: () => setState(() {
+                        _collapsed[section] = !(collapsed);
+                      }),
+                    ),
+                  );
+                }
+
+                final t = e.task!;
+                return KeyedSubtree(
+                  key: ValueKey('row_${t.id}'),
+                  child: _TaskRow(task: t, ref: ref),
+                );
+              },
+            ),
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          await Navigator.of(context).push(
+            MaterialPageRoute(builder: (_) => const TaskEditPage()),
+          );
+          if (context.mounted) {
+            ref.read(taskListProvider.notifier).refresh();
+          }
+        },
+        icon: const Icon(Icons.add),
+        label: const Text('Yeni görev'),
+      ),
+    );
+  }
+
+  /* ---------- Gruplama ve yardımcılar ---------- */
+
+  _SectionType _groupFor(Task t) {
+    if (t.done) return _SectionType.done;
+
+    final now = DateTime.now();
+    DateTime d(DateTime x) => DateTime(x.year, x.month, x.day);
+    final today = d(now);
+    final tomorrow = today.add(const Duration(days: 1));
+    final afterTomorrow = today.add(const Duration(days: 2));
+
+    if (t.due != null) {
+      final dueD = d(t.due!);
+      if (dueD == today) return _SectionType.today;
+      if (dueD == tomorrow) return _SectionType.tomorrow;
+      if (dueD.isAfter(tomorrow) || dueD == afterTomorrow) {
+        return _SectionType.later;
+      }
+    }
+    // due yoksa ve tamamlanmamışsa "Sonra"
+    return _SectionType.later;
+  }
+
+  Map<_SectionType, List<Task>> _bucketize(List<Task> list) {
+    final Map<_SectionType, List<Task>> buckets = {
+      _SectionType.today: [],
+      _SectionType.tomorrow: [],
+      _SectionType.later: [],
+      _SectionType.done: [],
+    };
+    for (final t in list) {
+      buckets[_groupFor(t)]!.add(t);
+    }
+    // Done her zaman en sonda (render sırası build’de zaten kontrol ediliyor)
+    return buckets;
+  }
+
+  Map<_SectionType, _Count> _countsFor(Map<_SectionType, List<Task>> buckets) {
+    return {
+      for (final e in buckets.entries)
+        e.key: _Count(
+          e.value.length,
+          e.value.where((t) => t.done).length,
+        )
+    };
+  }
+
+  List<_Entry> _buildEntriesFromBuckets(
+    Map<_SectionType, List<Task>> buckets, {
+    required Map<_SectionType, bool> collapsed,
+  }) {
+    final entries = <_Entry>[];
+
+    void addSection(_SectionType s) {
+      final items = buckets[s]!;
+      if (items.isEmpty) return;
+      entries.add(_Entry.header(s));
+      if (!(collapsed[s] ?? false)) {
+        for (final t in items) {
+          entries.add(_Entry.task(t));
+        }
+      }
+    }
+
+    addSection(_SectionType.today);
+    addSection(_SectionType.tomorrow);
+    addSection(_SectionType.later);
+    addSection(_SectionType.done); // sabit en son
+
+    return entries;
+  }
+
+  List<Task> _applyFilter(List<Task> src, TaskFilter f) {
+    switch (f) {
+      case TaskFilter.today:
+        final now = DateTime.now();
+        final start = DateTime(now.year, now.month, now.day);
+        final end = start.add(const Duration(days: 1));
+        return src.where((t) {
+          final d = t.due;
+          return d != null && d.isAfter(start) && d.isBefore(end);
+        }).toList();
+      case TaskFilter.done:
+        return src.where((t) => t.done).toList();
+      case TaskFilter.all:
+      return src;
+    }
+  }
+
+  List<Task> _applySearch(List<Task> src, String q) {
+    if (q.isEmpty) return src;
+    final lower = q.toLowerCase();
+    return src.where((t) {
+      final title = t.title.toLowerCase();
+      final note = (t.note ?? '').toLowerCase();
+      return title.contains(lower) || note.contains(lower);
+    }).toList();
+  }
+
+  /* ---------- Hızlı Aksiyonlar (uzun bas) ---------- */
+
+  Future<void> _showQuickActions(BuildContext context, Task t) async {
+    final repo = ref.read(taskListProvider.notifier);
+
+    Future<void> _apply(Task updated) async {
+      await repo.updateTask(updated);
+      HapticFeedback.selectionClick();
+    }
+
+    DateTime _at(int days, {int hours = 0}) {
+      final base = DateTime.now().add(Duration(days: days, hours: hours));
+      final hour = t.due?.hour ?? 9;
+      final minute = t.due?.minute ?? 0;
+      return DateTime(base.year, base.month, base.day, hour, minute);
+    }
+
+    await showModalBottomSheet(
+      context: context,
+      useSafeArea: true,
+      showDragHandle: true,
+      builder: (_) {
+        return ListView(
+          shrinkWrap: true,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.alarm_add),
+              title: const Text('1 saat ertele'),
+              onTap: () async {
+                final due = (t.due ?? DateTime.now()).add(const Duration(hours: 1));
+                await _apply(t.copyWith(done: false, due: due));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.schedule),
+              title: const Text('3 saat ertele'),
+              onTap: () async {
+                final due = (t.due ?? DateTime.now()).add(const Duration(hours: 3));
+                await _apply(t.copyWith(done: false, due: due));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.today),
+              title: const Text('Bugün'),
+              onTap: () async {
+                await _apply(_taskWithSectionApplied(t, _SectionType.today));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.calendar_view_day),
+              title: const Text('Yarın'),
+              onTap: () async {
+                await _apply(_taskWithSectionApplied(t, _SectionType.tomorrow));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.date_range),
+              title: const Text('+1 hafta'),
+              onTap: () async {
+                await _apply(t.copyWith(done: false, due: _at(7)));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: const Icon(Icons.event),
+              title: const Text('+1 ay'),
+              onTap: () async {
+                final now = DateTime.now();
+                final nextMonth = DateTime(now.year, now.month + 1, now.day);
+                final hour = t.due?.hour ?? 9;
+                final minute = t.due?.minute ?? 0;
+                await _apply(
+                  t.copyWith(done: false, due: DateTime(nextMonth.year, nextMonth.month, nextMonth.day, hour, minute)),
+                );
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            const Divider(height: 8),
+            ListTile(
+              leading: const Icon(Icons.back_hand),
+              title: const Text('Due’yu temizle (Sonra)'),
+              onTap: () async {
+                await _apply(_taskWithSectionApplied(t, _SectionType.later));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+            ListTile(
+              leading: Icon(t.done ? Icons.undo : Icons.check_circle),
+              title: Text(t.done ? 'Tamamlamayı geri al' : 'Tamamla'),
+              onTap: () async {
+                await _apply(t.copyWith(done: !t.done));
+                if (context.mounted) Navigator.pop(context);
+              },
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Bir görevi hedef bölüme taşındığında uygun due/done ile döndürür.
+  Task _taskWithSectionApplied(Task t, _SectionType section) {
+    switch (section) {
+      case _SectionType.today:
+        final base = DateTime.now();
+        final hour = t.due?.hour ?? 9;
+        final minute = t.due?.minute ?? 0;
+        return t.copyWith(
+          done: false,
+          due: DateTime(base.year, base.month, base.day, hour, minute),
+        );
+
+      case _SectionType.tomorrow:
+        final now = DateTime.now();
+        final hour = t.due?.hour ?? 9;
+        final minute = t.due?.minute ?? 0;
+        final tom = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
+        return t.copyWith(
+          done: false,
+          due: DateTime(tom.year, tom.month, tom.day, hour, minute),
+        );
+
+      case _SectionType.later:
+        return t.copyWith(done: false, due: null);
+
+      case _SectionType.done:
+        return t.copyWith(done: true);
+    }
+  }
+}
+
+/* ---------- Satır + Dismiss + Hızlı aksiyon sarmalayıcı ---------- */
+
+class _TaskRow extends StatelessWidget {
+  const _TaskRow({required this.task, required this.ref});
+  final Task task;
+  final WidgetRef ref;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = task;
+
+    return Dismissible(
+      key: ValueKey<int>(t.id!),
+      direction: DismissDirection.horizontal,
+
+      // Sil (sağdan sola), Tamamla/Geri Al (soldan sağa)
+      confirmDismiss: (direction) async {
+        if (direction == DismissDirection.endToStart) {
+          // SİLME
+          final ok = await showDialog<bool>(
+            context: context,
+            builder: (_) => AlertDialog(
+              title: const Text('Silinsin mi?'),
+              content: Text('“${t.title}” kalıcı olarak silinecek.'),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(context, false),
+                  child: const Text('Vazgeç'),
+                ),
+                FilledButton(
+                  onPressed: () => Navigator.pop(context, true),
+                  child: const Text('Sil'),
+                ),
+              ],
+            ),
+          );
+          if (ok == true) {
+            final removed = t;
+            await ref.read(taskListProvider.notifier).remove(t);
+
+            // Undo
+            if (context.mounted) {
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Silindi: ${removed.title}'),
+                  action: SnackBarAction(
+                    label: 'Geri Al',
+                    onPressed: () async {
+                      // Bu callback içinde context/State dispose olabilir; yalnızca provider çağırıyoruz.
+                      await ref.read(taskListProvider.notifier).add(
+                        removed.copyWith(id: null),
+                      );
+                    },
+                  ),
+                ),
+              );
+            }
+            return true; // Dismissible kendi kaldırır
+          }
+          return false;
+        } else {
+          // TAMAMLA / GERİ AL
+          await ref.read(taskListProvider.notifier).toggle(t);
+          HapticFeedback.selectionClick();
+          if (context.mounted) {
+            ScaffoldMessenger.of(context).hideCurrentSnackBar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                duration: const Duration(milliseconds: 1200),
+                content: Text(t.done ? 'Geri alındı' : 'Tamamlandı'),
+              ),
+            );
+          }
+          return false; // listeyi biz yeniliyoruz
+        }
+      },
+
+      // Sil için kırmızı arka plan (sağdan sola)
+      secondaryBackground: ExcludeSemantics(
+        child: Container(
+          alignment: Alignment.centerRight,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          color: Colors.red.withOpacity(.12),
+          child: const Icon(Icons.delete, size: 28),
+        ),
+      ),
+
+      // Tamamla/Geri al için yeşil arka plan (soldan sağa)
+      background: ExcludeSemantics(
+        child: Container(
+          alignment: Alignment.centerLeft,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          color: Colors.green.withOpacity(.12),
+          child: Icon(t.done ? Icons.undo : Icons.check_circle, size: 28),
+        ),
+      ),
+
+      // 🔥 Hızlı menü: uzun bas
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onLongPress: () {
+          final state = context.findAncestorStateOfType<_HomePageState>();
+          state?._showQuickActions(context, t);
+        },
+        child: TaskTile(
+          task: t,
+          onTap: () {
+            Navigator.of(context).push(
+              MaterialPageRoute(
+                builder: (_) => TaskEditPage(initial: t),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+/* ---------- UI parçaları ---------- */
+
+class _SectionHeader extends StatelessWidget {
+  const _SectionHeader({
+    required this.section,
+    required this.total,
+    required this.done,
+    required this.collapsed,
+    required this.onToggle,
+  });
+
+  final _SectionType section;
+  final int total;
+  final int done;
+  final bool collapsed;
+  final VoidCallback onToggle;
+
+  String get _label {
+    switch (section) {
+      case _SectionType.today:
+        return 'Bugün';
+      case _SectionType.tomorrow:
+        return 'Yarın';
+      case _SectionType.later:
+        return 'Sonra';
+      case _SectionType.done:
+        return 'Tamamlanan';
+    }
+  }
+
+  IconData get _icon {
+    switch (section) {
+      case _SectionType.today:
+        return Icons.today;
+      case _SectionType.tomorrow:
+        return Icons.calendar_view_day;
+      case _SectionType.later:
+        return Icons.upcoming;
+      case _SectionType.done:
+        return Icons.check_circle;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+
+    // “Bugün” ilerleme çubuğu (tamamlananlar aşağıya iniyor ama oran doğru)
+    final showProgress = section == _SectionType.today && total > 0;
+    final progress = total == 0 ? 0.0 : (done / total);
+
+    return InkWell(
+      onTap: onToggle,
+      child: Container(
+        key: ValueKey('section_${section.name}'),
+        padding: const EdgeInsets.fromLTRB(16, 14, 16, 10),
+        color: scheme.surfaceContainerHighest.withOpacity(.35),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(_icon, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _label,
+                    style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                          color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9),
+                          fontWeight: FontWeight.w600,
+                        ),
+                  ),
+                ),
+                // sayaç
+                Text('$done/$total', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(width: 8),
+                Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20),
+              ],
+            ),
+            if (showProgress) ...[
+              const SizedBox(height: 8),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: LinearProgressIndicator(
+                  value: progress.clamp(0.0, 1.0),
+                  minHeight: 6,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _InlineSearchField extends StatelessWidget {
+  const _InlineSearchField({required this.controller});
+  final TextEditingController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    return TextField(
+      controller: controller,
+      textInputAction: TextInputAction.search,
+      decoration: InputDecoration(
+        hintText: 'Görevlerde ara…',
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: controller.text.isEmpty
+            ? null
+            : IconButton(
+                tooltip: 'Temizle',
+                onPressed: () => controller.clear(),
+                icon: const Icon(Icons.clear),
+              ),
+        filled: true,
+        fillColor: scheme.surfaceContainerHighest.withOpacity(0.5),
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: scheme.outlineVariant),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(14),
+          borderSide: BorderSide(color: scheme.primary),
+        ),
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
+      ),
+    );
+  }
+}
+
+class _EmptyState extends StatelessWidget {
+  const _EmptyState();
+
+  @override
+  Widget build(BuildContext context) {
+    final scheme = Theme.of(context).colorScheme;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.inbox_outlined, size: 72, color: scheme.outline),
+            const SizedBox(height: 12),
+            Text(
+              'Hiç sonuç yok',
+              style: Theme.of(context).textTheme.titleLarge,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 8),
+            Text(
+              'Arama terimini değiştirin veya yeni bir görev ekleyin.',
+              textAlign: TextAlign.center,
+              style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                    color: Theme.of(context).textTheme.bodyMedium?.color?.withOpacity(0.7),
+                  ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _Count {
+  const _Count(this.total, this.done);
+  final int total;
+  final int done;
+}
+
+------------------------------------------------------
+
+-lib/pages/task_edit_page.dart
+
+// lib/pages/task_edit_page.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../models/task.dart';
+import '../providers/task_providers.dart';
+
+class TaskEditPage extends ConsumerStatefulWidget {
+  const TaskEditPage({super.key, this.initial});
+
+  final Task? initial;
+
+  @override
+  ConsumerState<TaskEditPage> createState() => _TaskEditPageState();
+}
+
+class _TaskEditPageState extends ConsumerState<TaskEditPage> {
+  final _formKey = GlobalKey<FormState>();
+  final _titleCtl = TextEditingController();
+  final _noteCtl = TextEditingController();
+
+  DateTime? _due;
+  RepeatRule _repeat = RepeatRule.none;
+  bool _done = false;
+
+  @override
+  void initState() {
+    super.initState();
+    final t = widget.initial;
+    _titleCtl.text = t?.title ?? '';
+    _noteCtl.text = t?.note ?? '';
+    _due = t?.due;
+    _repeat = t?.repeat ?? RepeatRule.none;
+    _done = t?.done ?? false;
+  }
+
+  @override
+  void dispose() {
+    _titleCtl.dispose();
+    _noteCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickDateTime() async {
+    final theme = Theme.of(context);
+    final now = DateTime.now();
+    final initialDate = _due ?? now;
+    final firstDate = DateTime(now.year - 1);
+    final lastDate = DateTime(now.year + 5);
+
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      helpText: 'Tarih seç',
+      cancelText: 'Vazgeç',
+      confirmText: 'Devam',
+      builder: (ctx, child) => Theme(
+        data: theme.copyWith(useMaterial3: true),
+        child: child!,
+      ),
+    );
+    if (date == null) return;
+
+    final tod = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(_due ?? now),
+      helpText: 'Saat seç',
+      cancelText: 'Vazgeç',
+      confirmText: 'Tamam',
+      builder: (ctx, child) => Theme(
+        data: theme.copyWith(useMaterial3: true),
+        child: child!,
+      ),
+    );
+    if (tod == null) return;
+
+    setState(() {
+      _due = DateTime(date.year, date.month, date.day, tod.hour, tod.minute);
+    });
+  }
+
+  void _setQuick(DateTime dt) => setState(() => _due = dt);
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    final base = widget.initial;
+    final toSave = Task(
+      id: base?.id,
+      title: _titleCtl.text.trim(),
+      note: _noteCtl.text.trim().isEmpty ? null : _noteCtl.text.trim(),
+      due: _due,
+      repeat: _repeat,
+      done: _done,
+      sort: base?.sort ?? 0,
+    );
+
+    final notifier = ref.read(taskListProvider.notifier);
+    if (base == null) {
+      await notifier.add(toSave);
+    } else {
+      await notifier.updateTask(toSave);
+    }
+    if (mounted) Navigator.pop(context);
+  }
+
+  // ---- metadata (createdAt / updatedAt) güvenli okuma ----
+  DateTime? _safeCreatedAt() {
+    try {
+      final dynamic t = widget.initial;
+      return t?.createdAt as DateTime?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  DateTime? _safeUpdatedAt() {
+    try {
+      final dynamic t = widget.initial;
+      return t?.updatedAt as DateTime?;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final isEdit = widget.initial != null;
+
+    final createdAt = _safeCreatedAt();
+    final updatedAt = _safeUpdatedAt();
+
+    return Scaffold(
+      appBar: AppBar(
+        title: Text(isEdit ? 'Görevi Düzenle' : 'Yeni Görev'),
+        actions: [
+          TextButton(onPressed: _save, child: const Text('Kaydet')),
+        ],
+      ),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 24),
+          children: [
+            // Başlık
+            TextFormField(
+              controller: _titleCtl,
+              autofocus: !isEdit,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'Başlık',
+                hintText: 'Ne yapacaksın?',
+              ),
+              validator: (v) =>
+                  (v == null || v.trim().isEmpty) ? 'Başlık gerekli' : null,
+            ),
+            const SizedBox(height: 12),
+
+            // Not
+            TextFormField(
+              controller: _noteCtl,
+              maxLines: 4,
+              decoration: const InputDecoration(
+                labelText: 'Not (isteğe bağlı)',
+                hintText: 'Detay, link ya da ek açıklama…',
+              ),
+            ),
+            const SizedBox(height: 16),
+
+            // Tarih / Saat
+            Text('Tarih & Saat', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                FilledButton.icon(
+                  onPressed: _pickDateTime,
+                  icon: const Icon(Icons.event),
+                  label: const Text('Tarih/Saat Seç'),
+                ),
+                if (_due != null)
+                  InputChip(
+                    avatar: const Icon(Icons.schedule, size: 16),
+                    label: Text(_formatDate(_due!)),
+                    onDeleted: () => setState(() => _due = null),
+                    deleteIcon: const Icon(Icons.clear),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 8),
+
+            // Hızlı kısayollar
+            Wrap(
+              spacing: 8,
+              runSpacing: -4,
+              children: [
+                ActionChip(
+                  avatar: const Icon(Icons.today, size: 16),
+                  label: const Text('Bugün 09:00'),
+                  onPressed: () {
+                    final n = DateTime.now();
+                    _setQuick(DateTime(n.year, n.month, n.day, 9, 0));
+                  },
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.nightlight_round, size: 16),
+                  label: const Text('Bu Akşam 20:00'),
+                  onPressed: () {
+                    final n = DateTime.now();
+                    _setQuick(DateTime(n.year, n.month, n.day, 20, 0));
+                  },
+                ),
+                ActionChip(
+                  avatar: const Icon(Icons.calendar_today, size: 16),
+                  label: const Text('Yarın 09:00'),
+                  onPressed: () {
+                    final n = DateTime.now().add(const Duration(days: 1));
+                    _setQuick(DateTime(n.year, n.month, n.day, 9, 0));
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+
+            // Tekrar
+            DropdownButtonFormField<RepeatRule>(
+              value: _repeat,
+              decoration: const InputDecoration(labelText: 'Tekrar'),
+              items: const [
+                DropdownMenuItem(value: RepeatRule.none, child: Text('Yok')),
+                DropdownMenuItem(value: RepeatRule.daily, child: Text('Günlük')),
+                DropdownMenuItem(value: RepeatRule.weekly, child: Text('Haftalık')),
+                DropdownMenuItem(value: RepeatRule.monthly, child: Text('Aylık')),
+              ],
+              onChanged: (v) => setState(() => _repeat = v ?? RepeatRule.none),
+            ),
+            const SizedBox(height: 12),
+
+            // Tamamlandı (sadece düzenlemede)
+            if (isEdit)
+              SwitchListTile(
+                value: _done,
+                onChanged: (v) => setState(() => _done = v),
+                title: const Text('Tamamlandı'),
+                contentPadding: EdgeInsets.zero,
+              ),
+
+            const SizedBox(height: 28),
+            FilledButton.icon(
+              onPressed: _save,
+              icon: const Icon(Icons.check),
+              label: const Text('Kaydet'),
+            ),
+
+            // ----- METADATA FOOTER -----
+            if (isEdit && (createdAt != null || updatedAt != null)) ...[
+              const SizedBox(height: 24),
+              const Divider(),
+              const SizedBox(height: 8),
+              _MetaRow(
+                icon: Icons.add_circle_outline,
+                label: 'Eklenme',
+                value: createdAt != null ? _formatDate(createdAt) : '—',
+              ),
+              const SizedBox(height: 6),
+              _MetaRow(
+                icon: Icons.edit_outlined,
+                label: 'Güncellenme',
+                value: updatedAt != null ? _formatDate(updatedAt) : '—',
+              ),
+              const SizedBox(height: 8),
+              Opacity(
+                opacity: .6,
+                child: Text(
+                  'Bu bilgiler salt okunurdur.',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _MetaRow extends StatelessWidget {
+  const _MetaRow({
+    required this.icon,
+    required this.label,
+    required this.value,
+  });
+
+  final IconData icon;
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context).textTheme;
+    return Row(
+      children: [
+        Icon(icon, size: 18),
+        const SizedBox(width: 8),
+        Text(label, style: t.bodySmall),
+        const Spacer(),
+        Text(value, style: t.bodySmall?.copyWith(fontFeatures: const [])),
+      ],
+    );
+  }
+}
+
+// ---- helpers ----
+String _formatDate(DateTime d) {
+  String two(int n) => n.toString().padLeft(2, '0');
+  final date = '${two(d.day)}.${two(d.month)}.${d.year}';
+  final time = '${two(d.hour)}:${two(d.minute)}';
+  return '$date $time';
+}
+
+------------------------------------------------------
+
+-lib/providers/task_providers.dart
+
+// lib/providers/task_providers.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:tasker/data/task_db.dart';
+import '../data/task_repository.dart';
+import '../models/task.dart';
+
+/// DB provider
+final taskDbProvider = Provider<TaskDb>((ref) => TaskDb());
+
+final taskRepositoryProvider = Provider<TaskRepository>((ref) {
+  final db = ref.watch(taskDbProvider);
+  return TaskRepository(db);
+});
+
+/// Liste + arama + sıralama
+final taskListProvider =
+    AsyncNotifierProvider<TaskListNotifier, List<Task>>(TaskListNotifier.new);
+
+class TaskListNotifier extends AsyncNotifier<List<Task>> {
+  late final TaskRepository _repo;
+
+  @override
+  Future<List<Task>> build() async {
+    _repo = ref.read(taskRepositoryProvider);
+    final items = await _repo.list();
+    return _sorted(items);
+  }
+
+  Future<void> refresh() async {
+    state = const AsyncLoading();
+    final items = await _repo.list();
+    state = AsyncData(_sorted(items));
+  }
+
+  Future<void> add(Task t) async {
+    await _repo.add(t);
+    await refresh();
+  }
+
+  Future<void> updateTask(Task t) async {
+    await _repo.update(t);
+    await refresh();
+  }
+
+  Future<void> remove(Task t) async {
+    final repo = ref.read(taskRepositoryProvider);
+    await repo.delete(t.id!);
+    await refresh();
+  }
+
+  /// home_page.dart’tan çağrılan toggle
+  Future<void> toggle(Task t) async {
+    final repo = ref.read(taskRepositoryProvider);
+    final toggled = t.copyWith(done: !t.done);
+    await repo.update(toggled);
+    await refresh();
+  }
+
+  /// Arama: başlık/nota göre filtrele, sonra kalıcı sıralamayı uygula
+  void search(String q) async {
+    final base = await _repo.list();
+    final filtered = q.trim().isEmpty
+        ? base
+        : base.where((t) {
+            final s = q.toLowerCase();
+            return t.title.toLowerCase().contains(s) ||
+                (t.note ?? '').toLowerCase().contains(s);
+          }).toList();
+    state = AsyncData(_sorted(filtered));
+  }
+
+  Future<void> reorder(int oldIndex, int newIndex) async {
+    state = const AsyncLoading();
+    final list = await ref.read(taskRepositoryProvider).reorder(oldIndex, newIndex);
+    state = AsyncValue.data(_sorted(list)); // 👈 kalıcı sort’a göre yeniden sırala
+  }
+
+  // --- SIRALAMA KURALI (KALICI) ---
+  // 1) Tamamlanmamışlar önce
+  // 2) Aynı grupta `sort` artan (DB’de saklanan sıra)
+  List<Task> _sorted(List<Task> list) {
+    final sorted = [...list]..sort((a, b) {
+      if (a.done != b.done) return a.done ? 1 : -1;
+      return a.sort.compareTo(b.sort);
+    });
+    return sorted;
+  }
+}
+
+------------------------------------------------------
+
+-lib/services/backup_service.dart
+import 'dart:convert';
+import 'dart:io';
+import 'package:path_provider/path_provider.dart';
+import '../models/task.dart';
+import '../data/task_repository.dart';
+
+class BackupService {
+  final TaskRepository repo;
+  BackupService(this.repo);
+
+  /// Tüm görevleri JSON dosyasına yazar, geçici dizinde dosya döner
+  Future<File> exportToJsonFile() async {
+    final items = await repo.list();
+
+    final payload = {
+      'format': 'cs_tasker',
+      'version': 1,
+      'exportedAt': DateTime.now().toIso8601String(),
+      'tasks': items.map((t) => t.toExportJson()).toList(),
+    };
+
+    final jsonStr = const JsonEncoder.withIndent('  ').convert(payload);
+    final dir = await getTemporaryDirectory();
+    final file = File('${dir.path}/cs_tasker_backup.json');
+    await file.writeAsString(jsonStr);
+    return file;
+  }
+
+  /// JSON dosyasından içe aktarım.
+  /// replaceAll=true ise önce tüm görevleri siler, sonra ekler.
+  /// merge (default) ise aynı id varsa günceller, yoksa sona ekler.
+  Future<int> importFromJsonFile(File file, {bool replaceAll = false}) async {
+    final raw = await file.readAsString();
+    final decoded = json.decode(raw) as Map<String, dynamic>;
+
+    if (decoded['format'] != 'cs_tasker') {
+      throw FormatException('Geçersiz format');
+    }
+
+    final List tasksJson = decoded['tasks'] as List? ?? [];
+    final incoming = tasksJson
+        .map((e) => Task.fromExportJson(e as Map<String, dynamic>))
+        .toList();
+
+    if (replaceAll) {
+      await repo.deleteAll();
+      // Baştan sıralayalım
+      for (var i = 0; i < incoming.length; i++) {
+        final toAdd = incoming[i].copyWith(id: null, sort: i * 1000);
+        await repo.add(toAdd);
+      }
+      return incoming.length;
+    } else {
+      // merge: id eşleşirse update, yoksa ekle (sona)
+      final existing = await repo.list();
+      final existingById = {
+        for (final t in existing.where((e) => e.id != null)) t.id!: t
+      };
+      int imported = 0;
+
+      // yeni eklenecekler için base index
+      int lastUndone = existing.where((e) => !e.done).length;
+
+      for (final inc in incoming) {
+        if (inc.id != null && existingById.containsKey(inc.id)) {
+          // var olanı güncelle (id’yi koru)
+          final keepId = inc.copyWith(id: inc.id);
+          await repo.update(keepId);
+          imported++;
+        } else {
+          // yeni ekle → tamamlanmamışsa sona sort ver, tamamlanmışsa zaten alta gider
+          final sort = (!inc.done ? (lastUndone++ * 1000) : inc.sort);
+          await repo.add(inc.copyWith(id: null, sort: sort));
+          imported++;
+        }
+      }
+      return imported;
+    }
+  }
+}
+
+------------------------------------------------------
+
+-lib/src/data/db.dart
+
+import 'dart:io';
+import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+
+import 'tables.dart';
+
+part 'db.g.dart';
+
+@DriftDatabase(tables: [Tasks, Reminders])
+class AppDb extends _$AppDb {
+  AppDb() : super(_open());
+  @override
+  int get schemaVersion => 1;
+}
+
+LazyDatabase _open() {
+  return LazyDatabase(() async {
+    final dir = await getApplicationDocumentsDirectory();
+    final file = File(p.join(dir.path, 'tasker.sqlite'));
+    return NativeDatabase.createInBackground(file);
+  });
+}
+
+------------------------------------------------------
+
+-lib/src/data/db.g.dart
+
+// GENERATED CODE - DO NOT MODIFY BY HAND
+
+part of 'db.dart';
+
+// ignore_for_file: type=lint
+class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $TasksTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _titleMeta = const VerificationMeta('title');
+  @override
+  late final GeneratedColumn<String> title = GeneratedColumn<String>(
+    'title',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _notesMeta = const VerificationMeta('notes');
+  @override
+  late final GeneratedColumn<String> notes = GeneratedColumn<String>(
+    'notes',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _isCompletedMeta = const VerificationMeta(
+    'isCompleted',
+  );
+  @override
+  late final GeneratedColumn<bool> isCompleted = GeneratedColumn<bool>(
+    'is_completed',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_completed" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _createdAtUtcMeta = const VerificationMeta(
+    'createdAtUtc',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAtUtc = GeneratedColumn<DateTime>(
+    'created_at_utc',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtUtcMeta = const VerificationMeta(
+    'updatedAtUtc',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAtUtc = GeneratedColumn<DateTime>(
+    'updated_at_utc',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    title,
+    notes,
+    isCompleted,
+    createdAtUtc,
+    updatedAtUtc,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'tasks';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Task> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('title')) {
+      context.handle(
+        _titleMeta,
+        title.isAcceptableOrUnknown(data['title']!, _titleMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_titleMeta);
+    }
+    if (data.containsKey('notes')) {
+      context.handle(
+        _notesMeta,
+        notes.isAcceptableOrUnknown(data['notes']!, _notesMeta),
+      );
+    }
+    if (data.containsKey('is_completed')) {
+      context.handle(
+        _isCompletedMeta,
+        isCompleted.isAcceptableOrUnknown(
+          data['is_completed']!,
+          _isCompletedMeta,
+        ),
+      );
+    }
+    if (data.containsKey('created_at_utc')) {
+      context.handle(
+        _createdAtUtcMeta,
+        createdAtUtc.isAcceptableOrUnknown(
+          data['created_at_utc']!,
+          _createdAtUtcMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtUtcMeta);
+    }
+    if (data.containsKey('updated_at_utc')) {
+      context.handle(
+        _updatedAtUtcMeta,
+        updatedAtUtc.isAcceptableOrUnknown(
+          data['updated_at_utc']!,
+          _updatedAtUtcMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Task map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Task(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      title: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}title'],
+      )!,
+      notes: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}notes'],
+      ),
+      isCompleted: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_completed'],
+      )!,
+      createdAtUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at_utc'],
+      )!,
+      updatedAtUtc: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at_utc'],
+      ),
+    );
+  }
+
+  @override
+  $TasksTable createAlias(String alias) {
+    return $TasksTable(attachedDatabase, alias);
+  }
+}
+
+class Task extends DataClass implements Insertable<Task> {
+  final String id;
+  final String title;
+  final String? notes;
+  final bool isCompleted;
+  final DateTime createdAtUtc;
+  final DateTime? updatedAtUtc;
+  const Task({
+    required this.id,
+    required this.title,
+    this.notes,
+    required this.isCompleted,
+    required this.createdAtUtc,
+    this.updatedAtUtc,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['title'] = Variable<String>(title);
+    if (!nullToAbsent || notes != null) {
+      map['notes'] = Variable<String>(notes);
+    }
+    map['is_completed'] = Variable<bool>(isCompleted);
+    map['created_at_utc'] = Variable<DateTime>(createdAtUtc);
+    if (!nullToAbsent || updatedAtUtc != null) {
+      map['updated_at_utc'] = Variable<DateTime>(updatedAtUtc);
+    }
+    return map;
+  }
+
+  TasksCompanion toCompanion(bool nullToAbsent) {
+    return TasksCompanion(
+      id: Value(id),
+      title: Value(title),
+      notes: notes == null && nullToAbsent
+          ? const Value.absent()
+          : Value(notes),
+      isCompleted: Value(isCompleted),
+      createdAtUtc: Value(createdAtUtc),
+      updatedAtUtc: updatedAtUtc == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAtUtc),
+    );
+  }
+
+  factory Task.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Task(
+      id: serializer.fromJson<String>(json['id']),
+      title: serializer.fromJson<String>(json['title']),
+      notes: serializer.fromJson<String?>(json['notes']),
+      isCompleted: serializer.fromJson<bool>(json['isCompleted']),
+      createdAtUtc: serializer.fromJson<DateTime>(json['createdAtUtc']),
+      updatedAtUtc: serializer.fromJson<DateTime?>(json['updatedAtUtc']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'title': serializer.toJson<String>(title),
+      'notes': serializer.toJson<String?>(notes),
+      'isCompleted': serializer.toJson<bool>(isCompleted),
+      'createdAtUtc': serializer.toJson<DateTime>(createdAtUtc),
+      'updatedAtUtc': serializer.toJson<DateTime?>(updatedAtUtc),
+    };
+  }
+
+  Task copyWith({
+    String? id,
+    String? title,
+    Value<String?> notes = const Value.absent(),
+    bool? isCompleted,
+    DateTime? createdAtUtc,
+    Value<DateTime?> updatedAtUtc = const Value.absent(),
+  }) => Task(
+    id: id ?? this.id,
+    title: title ?? this.title,
+    notes: notes.present ? notes.value : this.notes,
+    isCompleted: isCompleted ?? this.isCompleted,
+    createdAtUtc: createdAtUtc ?? this.createdAtUtc,
+    updatedAtUtc: updatedAtUtc.present ? updatedAtUtc.value : this.updatedAtUtc,
+  );
+  Task copyWithCompanion(TasksCompanion data) {
+    return Task(
+      id: data.id.present ? data.id.value : this.id,
+      title: data.title.present ? data.title.value : this.title,
+      notes: data.notes.present ? data.notes.value : this.notes,
+      isCompleted: data.isCompleted.present
+          ? data.isCompleted.value
+          : this.isCompleted,
+      createdAtUtc: data.createdAtUtc.present
+          ? data.createdAtUtc.value
+          : this.createdAtUtc,
+      updatedAtUtc: data.updatedAtUtc.present
+          ? data.updatedAtUtc.value
+          : this.updatedAtUtc,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Task(')
+          ..write('id: $id, ')
+          ..write('title: $title, ')
+          ..write('notes: $notes, ')
+          ..write('isCompleted: $isCompleted, ')
+          ..write('createdAtUtc: $createdAtUtc, ')
+          ..write('updatedAtUtc: $updatedAtUtc')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode =>
+      Object.hash(id, title, notes, isCompleted, createdAtUtc, updatedAtUtc);
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Task &&
+          other.id == this.id &&
+          other.title == this.title &&
+          other.notes == this.notes &&
+          other.isCompleted == this.isCompleted &&
+          other.createdAtUtc == this.createdAtUtc &&
+          other.updatedAtUtc == this.updatedAtUtc);
+}
+
+class TasksCompanion extends UpdateCompanion<Task> {
+  final Value<String> id;
+  final Value<String> title;
+  final Value<String?> notes;
+  final Value<bool> isCompleted;
+  final Value<DateTime> createdAtUtc;
+  final Value<DateTime?> updatedAtUtc;
+  final Value<int> rowid;
+  const TasksCompanion({
+    this.id = const Value.absent(),
+    this.title = const Value.absent(),
+    this.notes = const Value.absent(),
+    this.isCompleted = const Value.absent(),
+    this.createdAtUtc = const Value.absent(),
+    this.updatedAtUtc = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  TasksCompanion.insert({
+    required String id,
+    required String title,
+    this.notes = const Value.absent(),
+    this.isCompleted = const Value.absent(),
+    required DateTime createdAtUtc,
+    this.updatedAtUtc = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       title = Value(title),
+       createdAtUtc = Value(createdAtUtc);
+  static Insertable<Task> custom({
+    Expression<String>? id,
+    Expression<String>? title,
+    Expression<String>? notes,
+    Expression<bool>? isCompleted,
+    Expression<DateTime>? createdAtUtc,
+    Expression<DateTime>? updatedAtUtc,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (title != null) 'title': title,
+      if (notes != null) 'notes': notes,
+      if (isCompleted != null) 'is_completed': isCompleted,
+      if (createdAtUtc != null) 'created_at_utc': createdAtUtc,
+      if (updatedAtUtc != null) 'updated_at_utc': updatedAtUtc,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  TasksCompanion copyWith({
+    Value<String>? id,
+    Value<String>? title,
+    Value<String?>? notes,
+    Value<bool>? isCompleted,
+    Value<DateTime>? createdAtUtc,
+    Value<DateTime?>? updatedAtUtc,
+    Value<int>? rowid,
+  }) {
+    return TasksCompanion(
+      id: id ?? this.id,
+      title: title ?? this.title,
+      notes: notes ?? this.notes,
+      isCompleted: isCompleted ?? this.isCompleted,
+      createdAtUtc: createdAtUtc ?? this.createdAtUtc,
+      updatedAtUtc: updatedAtUtc ?? this.updatedAtUtc,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (title.present) {
+      map['title'] = Variable<String>(title.value);
+    }
+    if (notes.present) {
+      map['notes'] = Variable<String>(notes.value);
+    }
+    if (isCompleted.present) {
+      map['is_completed'] = Variable<bool>(isCompleted.value);
+    }
+    if (createdAtUtc.present) {
+      map['created_at_utc'] = Variable<DateTime>(createdAtUtc.value);
+    }
+    if (updatedAtUtc.present) {
+      map['updated_at_utc'] = Variable<DateTime>(updatedAtUtc.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('TasksCompanion(')
+          ..write('id: $id, ')
+          ..write('title: $title, ')
+          ..write('notes: $notes, ')
+          ..write('isCompleted: $isCompleted, ')
+          ..write('createdAtUtc: $createdAtUtc, ')
+          ..write('updatedAtUtc: $updatedAtUtc, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+class $RemindersTable extends Reminders
+    with TableInfo<$RemindersTable, Reminder> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $RemindersTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _idMeta = const VerificationMeta('id');
+  @override
+  late final GeneratedColumn<String> id = GeneratedColumn<String>(
+    'id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _taskIdMeta = const VerificationMeta('taskId');
+  @override
+  late final GeneratedColumn<String> taskId = GeneratedColumn<String>(
+    'task_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _localDateTimeMeta = const VerificationMeta(
+    'localDateTime',
+  );
+  @override
+  late final GeneratedColumn<DateTime> localDateTime =
+      GeneratedColumn<DateTime>(
+        'local_date_time',
+        aliasedName,
+        false,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: true,
+      );
+  static const VerificationMeta _timeZoneIdMeta = const VerificationMeta(
+    'timeZoneId',
+  );
+  @override
+  late final GeneratedColumn<String> timeZoneId = GeneratedColumn<String>(
+    'time_zone_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _utcFireAtMeta = const VerificationMeta(
+    'utcFireAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> utcFireAt = GeneratedColumn<DateTime>(
+    'utc_fire_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _isActiveMeta = const VerificationMeta(
+    'isActive',
+  );
+  @override
+  late final GeneratedColumn<bool> isActive = GeneratedColumn<bool>(
+    'is_active',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("is_active" IN (0, 1))',
+    ),
+    defaultValue: const Constant(true),
+  );
+  static const VerificationMeta _notificationIdMeta = const VerificationMeta(
+    'notificationId',
+  );
+  @override
+  late final GeneratedColumn<int> notificationId = GeneratedColumn<int>(
+    'notification_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    id,
+    taskId,
+    localDateTime,
+    timeZoneId,
+    utcFireAt,
+    isActive,
+    notificationId,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'reminders';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<Reminder> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('id')) {
+      context.handle(_idMeta, id.isAcceptableOrUnknown(data['id']!, _idMeta));
+    } else if (isInserting) {
+      context.missing(_idMeta);
+    }
+    if (data.containsKey('task_id')) {
+      context.handle(
+        _taskIdMeta,
+        taskId.isAcceptableOrUnknown(data['task_id']!, _taskIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_taskIdMeta);
+    }
+    if (data.containsKey('local_date_time')) {
+      context.handle(
+        _localDateTimeMeta,
+        localDateTime.isAcceptableOrUnknown(
+          data['local_date_time']!,
+          _localDateTimeMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_localDateTimeMeta);
+    }
+    if (data.containsKey('time_zone_id')) {
+      context.handle(
+        _timeZoneIdMeta,
+        timeZoneId.isAcceptableOrUnknown(
+          data['time_zone_id']!,
+          _timeZoneIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_timeZoneIdMeta);
+    }
+    if (data.containsKey('utc_fire_at')) {
+      context.handle(
+        _utcFireAtMeta,
+        utcFireAt.isAcceptableOrUnknown(data['utc_fire_at']!, _utcFireAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_utcFireAtMeta);
+    }
+    if (data.containsKey('is_active')) {
+      context.handle(
+        _isActiveMeta,
+        isActive.isAcceptableOrUnknown(data['is_active']!, _isActiveMeta),
+      );
+    }
+    if (data.containsKey('notification_id')) {
+      context.handle(
+        _notificationIdMeta,
+        notificationId.isAcceptableOrUnknown(
+          data['notification_id']!,
+          _notificationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_notificationIdMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {id};
+  @override
+  Reminder map(Map<String, dynamic> data, {String? tablePrefix}) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return Reminder(
+      id: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}id'],
+      )!,
+      taskId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}task_id'],
+      )!,
+      localDateTime: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}local_date_time'],
+      )!,
+      timeZoneId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}time_zone_id'],
+      )!,
+      utcFireAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}utc_fire_at'],
+      )!,
+      isActive: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}is_active'],
+      )!,
+      notificationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}notification_id'],
+      )!,
+    );
+  }
+
+  @override
+  $RemindersTable createAlias(String alias) {
+    return $RemindersTable(attachedDatabase, alias);
+  }
+}
+
+class Reminder extends DataClass implements Insertable<Reminder> {
+  final String id;
+  final String taskId;
+  final DateTime localDateTime;
+  final String timeZoneId;
+  final DateTime utcFireAt;
+  final bool isActive;
+  final int notificationId;
+  const Reminder({
+    required this.id,
+    required this.taskId,
+    required this.localDateTime,
+    required this.timeZoneId,
+    required this.utcFireAt,
+    required this.isActive,
+    required this.notificationId,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['id'] = Variable<String>(id);
+    map['task_id'] = Variable<String>(taskId);
+    map['local_date_time'] = Variable<DateTime>(localDateTime);
+    map['time_zone_id'] = Variable<String>(timeZoneId);
+    map['utc_fire_at'] = Variable<DateTime>(utcFireAt);
+    map['is_active'] = Variable<bool>(isActive);
+    map['notification_id'] = Variable<int>(notificationId);
+    return map;
+  }
+
+  RemindersCompanion toCompanion(bool nullToAbsent) {
+    return RemindersCompanion(
+      id: Value(id),
+      taskId: Value(taskId),
+      localDateTime: Value(localDateTime),
+      timeZoneId: Value(timeZoneId),
+      utcFireAt: Value(utcFireAt),
+      isActive: Value(isActive),
+      notificationId: Value(notificationId),
+    );
+  }
+
+  factory Reminder.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return Reminder(
+      id: serializer.fromJson<String>(json['id']),
+      taskId: serializer.fromJson<String>(json['taskId']),
+      localDateTime: serializer.fromJson<DateTime>(json['localDateTime']),
+      timeZoneId: serializer.fromJson<String>(json['timeZoneId']),
+      utcFireAt: serializer.fromJson<DateTime>(json['utcFireAt']),
+      isActive: serializer.fromJson<bool>(json['isActive']),
+      notificationId: serializer.fromJson<int>(json['notificationId']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'id': serializer.toJson<String>(id),
+      'taskId': serializer.toJson<String>(taskId),
+      'localDateTime': serializer.toJson<DateTime>(localDateTime),
+      'timeZoneId': serializer.toJson<String>(timeZoneId),
+      'utcFireAt': serializer.toJson<DateTime>(utcFireAt),
+      'isActive': serializer.toJson<bool>(isActive),
+      'notificationId': serializer.toJson<int>(notificationId),
+    };
+  }
+
+  Reminder copyWith({
+    String? id,
+    String? taskId,
+    DateTime? localDateTime,
+    String? timeZoneId,
+    DateTime? utcFireAt,
+    bool? isActive,
+    int? notificationId,
+  }) => Reminder(
+    id: id ?? this.id,
+    taskId: taskId ?? this.taskId,
+    localDateTime: localDateTime ?? this.localDateTime,
+    timeZoneId: timeZoneId ?? this.timeZoneId,
+    utcFireAt: utcFireAt ?? this.utcFireAt,
+    isActive: isActive ?? this.isActive,
+    notificationId: notificationId ?? this.notificationId,
+  );
+  Reminder copyWithCompanion(RemindersCompanion data) {
+    return Reminder(
+      id: data.id.present ? data.id.value : this.id,
+      taskId: data.taskId.present ? data.taskId.value : this.taskId,
+      localDateTime: data.localDateTime.present
+          ? data.localDateTime.value
+          : this.localDateTime,
+      timeZoneId: data.timeZoneId.present
+          ? data.timeZoneId.value
+          : this.timeZoneId,
+      utcFireAt: data.utcFireAt.present ? data.utcFireAt.value : this.utcFireAt,
+      isActive: data.isActive.present ? data.isActive.value : this.isActive,
+      notificationId: data.notificationId.present
+          ? data.notificationId.value
+          : this.notificationId,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('Reminder(')
+          ..write('id: $id, ')
+          ..write('taskId: $taskId, ')
+          ..write('localDateTime: $localDateTime, ')
+          ..write('timeZoneId: $timeZoneId, ')
+          ..write('utcFireAt: $utcFireAt, ')
+          ..write('isActive: $isActive, ')
+          ..write('notificationId: $notificationId')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    id,
+    taskId,
+    localDateTime,
+    timeZoneId,
+    utcFireAt,
+    isActive,
+    notificationId,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is Reminder &&
+          other.id == this.id &&
+          other.taskId == this.taskId &&
+          other.localDateTime == this.localDateTime &&
+          other.timeZoneId == this.timeZoneId &&
+          other.utcFireAt == this.utcFireAt &&
+          other.isActive == this.isActive &&
+          other.notificationId == this.notificationId);
+}
+
+class RemindersCompanion extends UpdateCompanion<Reminder> {
+  final Value<String> id;
+  final Value<String> taskId;
+  final Value<DateTime> localDateTime;
+  final Value<String> timeZoneId;
+  final Value<DateTime> utcFireAt;
+  final Value<bool> isActive;
+  final Value<int> notificationId;
+  final Value<int> rowid;
+  const RemindersCompanion({
+    this.id = const Value.absent(),
+    this.taskId = const Value.absent(),
+    this.localDateTime = const Value.absent(),
+    this.timeZoneId = const Value.absent(),
+    this.utcFireAt = const Value.absent(),
+    this.isActive = const Value.absent(),
+    this.notificationId = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  RemindersCompanion.insert({
+    required String id,
+    required String taskId,
+    required DateTime localDateTime,
+    required String timeZoneId,
+    required DateTime utcFireAt,
+    this.isActive = const Value.absent(),
+    required int notificationId,
+    this.rowid = const Value.absent(),
+  }) : id = Value(id),
+       taskId = Value(taskId),
+       localDateTime = Value(localDateTime),
+       timeZoneId = Value(timeZoneId),
+       utcFireAt = Value(utcFireAt),
+       notificationId = Value(notificationId);
+  static Insertable<Reminder> custom({
+    Expression<String>? id,
+    Expression<String>? taskId,
+    Expression<DateTime>? localDateTime,
+    Expression<String>? timeZoneId,
+    Expression<DateTime>? utcFireAt,
+    Expression<bool>? isActive,
+    Expression<int>? notificationId,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (id != null) 'id': id,
+      if (taskId != null) 'task_id': taskId,
+      if (localDateTime != null) 'local_date_time': localDateTime,
+      if (timeZoneId != null) 'time_zone_id': timeZoneId,
+      if (utcFireAt != null) 'utc_fire_at': utcFireAt,
+      if (isActive != null) 'is_active': isActive,
+      if (notificationId != null) 'notification_id': notificationId,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  RemindersCompanion copyWith({
+    Value<String>? id,
+    Value<String>? taskId,
+    Value<DateTime>? localDateTime,
+    Value<String>? timeZoneId,
+    Value<DateTime>? utcFireAt,
+    Value<bool>? isActive,
+    Value<int>? notificationId,
+    Value<int>? rowid,
+  }) {
+    return RemindersCompanion(
+      id: id ?? this.id,
+      taskId: taskId ?? this.taskId,
+      localDateTime: localDateTime ?? this.localDateTime,
+      timeZoneId: timeZoneId ?? this.timeZoneId,
+      utcFireAt: utcFireAt ?? this.utcFireAt,
+      isActive: isActive ?? this.isActive,
+      notificationId: notificationId ?? this.notificationId,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (id.present) {
+      map['id'] = Variable<String>(id.value);
+    }
+    if (taskId.present) {
+      map['task_id'] = Variable<String>(taskId.value);
+    }
+    if (localDateTime.present) {
+      map['local_date_time'] = Variable<DateTime>(localDateTime.value);
+    }
+    if (timeZoneId.present) {
+      map['time_zone_id'] = Variable<String>(timeZoneId.value);
+    }
+    if (utcFireAt.present) {
+      map['utc_fire_at'] = Variable<DateTime>(utcFireAt.value);
+    }
+    if (isActive.present) {
+      map['is_active'] = Variable<bool>(isActive.value);
+    }
+    if (notificationId.present) {
+      map['notification_id'] = Variable<int>(notificationId.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('RemindersCompanion(')
+          ..write('id: $id, ')
+          ..write('taskId: $taskId, ')
+          ..write('localDateTime: $localDateTime, ')
+          ..write('timeZoneId: $timeZoneId, ')
+          ..write('utcFireAt: $utcFireAt, ')
+          ..write('isActive: $isActive, ')
+          ..write('notificationId: $notificationId, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
+abstract class _$AppDb extends GeneratedDatabase {
+  _$AppDb(QueryExecutor e) : super(e);
+  $AppDbManager get managers => $AppDbManager(this);
+  late final $TasksTable tasks = $TasksTable(this);
+  late final $RemindersTable reminders = $RemindersTable(this);
+  @override
+  Iterable<TableInfo<Table, Object?>> get allTables =>
+      allSchemaEntities.whereType<TableInfo<Table, Object?>>();
+  @override
+  List<DatabaseSchemaEntity> get allSchemaEntities => [tasks, reminders];
+}
+
+typedef $$TasksTableCreateCompanionBuilder =
+    TasksCompanion Function({
+      required String id,
+      required String title,
+      Value<String?> notes,
+      Value<bool> isCompleted,
+      required DateTime createdAtUtc,
+      Value<DateTime?> updatedAtUtc,
+      Value<int> rowid,
+    });
+typedef $$TasksTableUpdateCompanionBuilder =
+    TasksCompanion Function({
+      Value<String> id,
+      Value<String> title,
+      Value<String?> notes,
+      Value<bool> isCompleted,
+      Value<DateTime> createdAtUtc,
+      Value<DateTime?> updatedAtUtc,
+      Value<int> rowid,
+    });
+
+class $$TasksTableFilterComposer extends Composer<_$AppDb, $TasksTable> {
+  $$TasksTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get notes => $composableBuilder(
+    column: $table.notes,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAtUtc => $composableBuilder(
+    column: $table.createdAtUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAtUtc => $composableBuilder(
+    column: $table.updatedAtUtc,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$TasksTableOrderingComposer extends Composer<_$AppDb, $TasksTable> {
+  $$TasksTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get title => $composableBuilder(
+    column: $table.title,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get notes => $composableBuilder(
+    column: $table.notes,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAtUtc => $composableBuilder(
+    column: $table.createdAtUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAtUtc => $composableBuilder(
+    column: $table.updatedAtUtc,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$TasksTableAnnotationComposer extends Composer<_$AppDb, $TasksTable> {
+  $$TasksTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get title =>
+      $composableBuilder(column: $table.title, builder: (column) => column);
+
+  GeneratedColumn<String> get notes =>
+      $composableBuilder(column: $table.notes, builder: (column) => column);
+
+  GeneratedColumn<bool> get isCompleted => $composableBuilder(
+    column: $table.isCompleted,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAtUtc => $composableBuilder(
+    column: $table.createdAtUtc,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get updatedAtUtc => $composableBuilder(
+    column: $table.updatedAtUtc,
+    builder: (column) => column,
+  );
+}
+
+class $$TasksTableTableManager
+    extends
+        RootTableManager<
+          _$AppDb,
+          $TasksTable,
+          Task,
+          $$TasksTableFilterComposer,
+          $$TasksTableOrderingComposer,
+          $$TasksTableAnnotationComposer,
+          $$TasksTableCreateCompanionBuilder,
+          $$TasksTableUpdateCompanionBuilder,
+          (Task, BaseReferences<_$AppDb, $TasksTable, Task>),
+          Task,
+          PrefetchHooks Function()
+        > {
+  $$TasksTableTableManager(_$AppDb db, $TasksTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$TasksTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$TasksTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$TasksTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> title = const Value.absent(),
+                Value<String?> notes = const Value.absent(),
+                Value<bool> isCompleted = const Value.absent(),
+                Value<DateTime> createdAtUtc = const Value.absent(),
+                Value<DateTime?> updatedAtUtc = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => TasksCompanion(
+                id: id,
+                title: title,
+                notes: notes,
+                isCompleted: isCompleted,
+                createdAtUtc: createdAtUtc,
+                updatedAtUtc: updatedAtUtc,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String title,
+                Value<String?> notes = const Value.absent(),
+                Value<bool> isCompleted = const Value.absent(),
+                required DateTime createdAtUtc,
+                Value<DateTime?> updatedAtUtc = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => TasksCompanion.insert(
+                id: id,
+                title: title,
+                notes: notes,
+                isCompleted: isCompleted,
+                createdAtUtc: createdAtUtc,
+                updatedAtUtc: updatedAtUtc,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$TasksTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDb,
+      $TasksTable,
+      Task,
+      $$TasksTableFilterComposer,
+      $$TasksTableOrderingComposer,
+      $$TasksTableAnnotationComposer,
+      $$TasksTableCreateCompanionBuilder,
+      $$TasksTableUpdateCompanionBuilder,
+      (Task, BaseReferences<_$AppDb, $TasksTable, Task>),
+      Task,
+      PrefetchHooks Function()
+    >;
+typedef $$RemindersTableCreateCompanionBuilder =
+    RemindersCompanion Function({
+      required String id,
+      required String taskId,
+      required DateTime localDateTime,
+      required String timeZoneId,
+      required DateTime utcFireAt,
+      Value<bool> isActive,
+      required int notificationId,
+      Value<int> rowid,
+    });
+typedef $$RemindersTableUpdateCompanionBuilder =
+    RemindersCompanion Function({
+      Value<String> id,
+      Value<String> taskId,
+      Value<DateTime> localDateTime,
+      Value<String> timeZoneId,
+      Value<DateTime> utcFireAt,
+      Value<bool> isActive,
+      Value<int> notificationId,
+      Value<int> rowid,
+    });
+
+class $$RemindersTableFilterComposer
+    extends Composer<_$AppDb, $RemindersTable> {
+  $$RemindersTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get taskId => $composableBuilder(
+    column: $table.taskId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get localDateTime => $composableBuilder(
+    column: $table.localDateTime,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get timeZoneId => $composableBuilder(
+    column: $table.timeZoneId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get utcFireAt => $composableBuilder(
+    column: $table.utcFireAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get isActive => $composableBuilder(
+    column: $table.isActive,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$RemindersTableOrderingComposer
+    extends Composer<_$AppDb, $RemindersTable> {
+  $$RemindersTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get id => $composableBuilder(
+    column: $table.id,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get taskId => $composableBuilder(
+    column: $table.taskId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get localDateTime => $composableBuilder(
+    column: $table.localDateTime,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get timeZoneId => $composableBuilder(
+    column: $table.timeZoneId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get utcFireAt => $composableBuilder(
+    column: $table.utcFireAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get isActive => $composableBuilder(
+    column: $table.isActive,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$RemindersTableAnnotationComposer
+    extends Composer<_$AppDb, $RemindersTable> {
+  $$RemindersTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get id =>
+      $composableBuilder(column: $table.id, builder: (column) => column);
+
+  GeneratedColumn<String> get taskId =>
+      $composableBuilder(column: $table.taskId, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get localDateTime => $composableBuilder(
+    column: $table.localDateTime,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get timeZoneId => $composableBuilder(
+    column: $table.timeZoneId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get utcFireAt =>
+      $composableBuilder(column: $table.utcFireAt, builder: (column) => column);
+
+  GeneratedColumn<bool> get isActive =>
+      $composableBuilder(column: $table.isActive, builder: (column) => column);
+
+  GeneratedColumn<int> get notificationId => $composableBuilder(
+    column: $table.notificationId,
+    builder: (column) => column,
+  );
+}
+
+class $$RemindersTableTableManager
+    extends
+        RootTableManager<
+          _$AppDb,
+          $RemindersTable,
+          Reminder,
+          $$RemindersTableFilterComposer,
+          $$RemindersTableOrderingComposer,
+          $$RemindersTableAnnotationComposer,
+          $$RemindersTableCreateCompanionBuilder,
+          $$RemindersTableUpdateCompanionBuilder,
+          (Reminder, BaseReferences<_$AppDb, $RemindersTable, Reminder>),
+          Reminder,
+          PrefetchHooks Function()
+        > {
+  $$RemindersTableTableManager(_$AppDb db, $RemindersTable table)
+    : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$RemindersTableFilterComposer($db: db, $table: table),
+          createOrderingComposer: () =>
+              $$RemindersTableOrderingComposer($db: db, $table: table),
+          createComputedFieldComposer: () =>
+              $$RemindersTableAnnotationComposer($db: db, $table: table),
+          updateCompanionCallback:
+              ({
+                Value<String> id = const Value.absent(),
+                Value<String> taskId = const Value.absent(),
+                Value<DateTime> localDateTime = const Value.absent(),
+                Value<String> timeZoneId = const Value.absent(),
+                Value<DateTime> utcFireAt = const Value.absent(),
+                Value<bool> isActive = const Value.absent(),
+                Value<int> notificationId = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => RemindersCompanion(
+                id: id,
+                taskId: taskId,
+                localDateTime: localDateTime,
+                timeZoneId: timeZoneId,
+                utcFireAt: utcFireAt,
+                isActive: isActive,
+                notificationId: notificationId,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String id,
+                required String taskId,
+                required DateTime localDateTime,
+                required String timeZoneId,
+                required DateTime utcFireAt,
+                Value<bool> isActive = const Value.absent(),
+                required int notificationId,
+                Value<int> rowid = const Value.absent(),
+              }) => RemindersCompanion.insert(
+                id: id,
+                taskId: taskId,
+                localDateTime: localDateTime,
+                timeZoneId: timeZoneId,
+                utcFireAt: utcFireAt,
+                isActive: isActive,
+                notificationId: notificationId,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$RemindersTableProcessedTableManager =
+    ProcessedTableManager<
+      _$AppDb,
+      $RemindersTable,
+      Reminder,
+      $$RemindersTableFilterComposer,
+      $$RemindersTableOrderingComposer,
+      $$RemindersTableAnnotationComposer,
+      $$RemindersTableCreateCompanionBuilder,
+      $$RemindersTableUpdateCompanionBuilder,
+      (Reminder, BaseReferences<_$AppDb, $RemindersTable, Reminder>),
+      Reminder,
+      PrefetchHooks Function()
+    >;
+
+class $AppDbManager {
+  final _$AppDb _db;
+  $AppDbManager(this._db);
+  $$TasksTableTableManager get tasks =>
+      $$TasksTableTableManager(_db, _db.tasks);
+  $$RemindersTableTableManager get reminders =>
+      $$RemindersTableTableManager(_db, _db.reminders);
+}
+
+------------------------------------------------------
+
+-lib/src/data/repos.dart
+
+import 'package:drift/drift.dart';
+import 'db.dart';
+
+class TaskRepo {
+  TaskRepo(this.db);
+  final AppDb db;
+
+  Future<void> insertTask(TasksCompanion data) => db.into(db.tasks).insert(data);
+  Stream<List<Task>> watchActive() =>
+      (db.select(db.tasks)..where((t) => t.isCompleted.equals(false))).watch();
+}
+
+class ReminderRepo {
+  ReminderRepo(this.db);
+  final AppDb db;
+
+  Future<void> insertReminder(RemindersCompanion data) =>
+      db.into(db.reminders).insert(data);
+
+  Future<void> updateUtc(String id, DateTime utc) =>
+      (db.update(db.reminders)..where((r) => r.id.equals(id)))
+          .write(RemindersCompanion(utcFireAt: Value(utc)));
+
+  Future<List<Reminder>> getActive() =>
+      (db.select(db.reminders)..where((r) => r.isActive.equals(true))).get();
+}
+
+------------------------------------------------------
+
+-lib/src/data/tables.dart
+
+import 'package:drift/drift.dart';
+
+class Tasks extends Table {
+  TextColumn get id => text()();           // uuid
+  TextColumn get title => text()();
+  TextColumn get notes => text().nullable()();
+  BoolColumn get isCompleted => boolean().withDefault(const Constant(false))();
+  DateTimeColumn get createdAtUtc => dateTime()();
+  DateTimeColumn get updatedAtUtc => dateTime().nullable()();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+class Reminders extends Table {
+  TextColumn get id => text()();           // uuid
+  TextColumn get taskId => text()();       // fk Tasks.id
+  DateTimeColumn get localDateTime => dateTime()(); // kullanıcının seçtiği yerel tarih+saat
+  TextColumn get timeZoneId => text()();   // Europe/Istanbul
+  DateTimeColumn get utcFireAt => dateTime()(); // hesaplanmış
+  BoolColumn get isActive => boolean().withDefault(const Constant(true))();
+  IntColumn get notificationId => integer()(); // android/iOS için unique int
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+------------------------------------------------------
+
+-lib/src/domain/scheduler_service.dart
+
+import 'package:timezone/timezone.dart' as tz;
+import '../notifications/notification_service.dart';
+import 'time_service.dart';
+
+class SchedulerService {
+  SchedulerService(this._time);
+  final TimeService _time;
+
+  Future<void> scheduleOneShot({
+    required String tzId,
+    required DateTime localDateTime,
+    required int notificationId,
+    required String title,
+    required String body,
+  }) async {
+    final tzdt = _time.localToTz(tzId, localDateTime);
+    await NotificationService.instance.scheduleExact(
+      id: notificationId,
+      title: title,
+      body: body,
+      when: tzdt,
+    );
+  }
+
+  Future<void> snooze({
+    required int notificationId,
+    required Duration delta,
+    required String title,
+    required String body,
+  }) async {
+    final when = tz.TZDateTime.now(tz.local).add(delta);
+    await NotificationService.instance.scheduleExact(
+      id: notificationId,
+      title: title,
+      body: body,
+      when: when,
+    );
+  }
+
+  Future<void> cancel(int notificationId) =>
+      NotificationService.instance.cancel(notificationId);
+}
+
+------------------------------------------------------
+
+-lib/src/domain/time_service.dart
+
+import 'package:timezone/timezone.dart' as tz;
+
+class TimeService {
+  tz.TZDateTime localToTz(String tzId, DateTime local) {
+    final loc = tz.getLocation(tzId);
+    // local (DateTime) saat/dakika kullanıcı seçimi; bunu TZDateTime’a projekte ediyoruz
+    return tz.TZDateTime.from(local, loc);
+  }
+
+  DateTime toUtcFromLocal(String tzId, DateTime local) {
+    final tzdt = localToTz(tzId, local);
+    return tzdt.toUtc();
+  }
+}
+
+------------------------------------------------------
+
+-lib/src/notifications/notification_service.dart
+
+import 'dart:async';
+import 'dart:io';
+import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:timezone/timezone.dart' as tz;
+
+class NotificationService {
+  static final _flnp = FlutterLocalNotificationsPlugin();
+  static final StreamController<String> _tapPayloadCtrl =
+      StreamController<String>.broadcast();
+
+  static Stream<String> get onNotificationTap => _tapPayloadCtrl.stream;
+
+  /// Uygulama ilk açıldığında çağrılır.
+  static Future<void> init() async {
+    final androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
+
+    // 👇 const KALDIRILDI — çünkü içindeki kategoriler const olamaz
+    final darwinInit = DarwinInitializationSettings(
+      requestAlertPermission: false,
+      requestBadgePermission: false,
+      requestSoundPermission: false,
+      notificationCategories: [
+        DarwinNotificationCategory(
+          'task_actions',
+          actions: [
+            DarwinNotificationAction.plain('complete', 'Tamamla'),
+            DarwinNotificationAction.plain('snooze5', '5 dk ertele'),
+          ],
+          options: {DarwinNotificationCategoryOption.hiddenPreviewShowTitle},
+        ),
+      ],
+    );
+
+    final settings = InitializationSettings(
+      android: androidInit,
+      iOS: darwinInit,
+      macOS: darwinInit,
+    );
+
+    await _flnp.initialize(
+      settings,
+      onDidReceiveNotificationResponse: (resp) async {
+        final payload = resp.payload ?? '';
+        final action = resp.actionId;
+
+        if (action == 'complete') {
+          _tapPayloadCtrl.add('action:complete;$payload');
+        } else if (action == 'snooze5') {
+          _tapPayloadCtrl.add('action:snooze5;$payload');
+        } else {
+          _tapPayloadCtrl.add(payload);
+        }
+      },
+      onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
+    );
+
+    // 🔔 Platform bazlı izinler
+    if (Platform.isAndroid) {
+      final android = _flnp.resolvePlatformSpecificImplementation<
+          AndroidFlutterLocalNotificationsPlugin>();
+      await android?.requestNotificationsPermission();
+    } else if (Platform.isIOS || Platform.isMacOS) {
+      final darwin = _flnp.resolvePlatformSpecificImplementation<
+          IOSFlutterLocalNotificationsPlugin>();
+      await darwin?.requestPermissions(alert: true, badge: true, sound: true);
+    }
+  }
+
+  @pragma('vm:entry-point')
+  static void notificationTapBackground(NotificationResponse resp) {
+    // arka plan tıklamaları sessizce geçilir
+  }
+
+  /// Anında gösterilen bildirim
+  static Future<void> showInstant({
+    required int id,
+    required String title,
+    required String body,
+    String? payload,
+  }) async {
+    const android = AndroidNotificationDetails(
+      'default_channel_id',
+      'General',
+      channelDescription: 'General notifications',
+      importance: Importance.high,
+      priority: Priority.high,
+    );
+
+    const darwin = DarwinNotificationDetails(
+      presentAlert: true,
+      presentBadge: true,
+      presentSound: true,
+    );
+
+    const details =
+        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+
+    await _flnp.show(id, title, body, details, payload: payload);
+  }
+
+  /// Zamanlı (tek seferlik) bildirim planlama
+  static Future<void> scheduleAt({
+    required int id,
+    required String title,
+    required String body,
+    required tz.TZDateTime when,
+    String? payload,
+  }) async {
+    final now = tz.TZDateTime.now(tz.local);
+    if (!when.isAfter(now.add(const Duration(seconds: 1)))) {
+      // geçmiş bir zaman => planlama yapma
+      return;
+    }
+
+    final android = AndroidNotificationDetails(
+      'reminder_channel_id',
+      'Reminders',
+      channelDescription: 'Task reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+      actions: [
+        const AndroidNotificationAction('complete', 'Tamamla'),
+        const AndroidNotificationAction('snooze5', '5 dk ertele'),
+      ],
+    );
+
+    final darwin = const DarwinNotificationDetails(
+      categoryIdentifier: 'task_actions',
+    );
+
+    final details =
+        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+
+    await _flnp.zonedSchedule(
+      id,
+      title,
+      body,
+      when,
+      details,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      payload: payload,
+      matchDateTimeComponents: null,
+    );
+  }
+
+  /// Günlük tekrar eden bildirim
+  static Future<void> scheduleDaily({
+    required int id,
+    required String title,
+    required String body,
+    required tz.TZDateTime firstTime,
+    String? payload,
+  }) async {
+    final android = AndroidNotificationDetails(
+      'reminder_channel_id',
+      'Reminders',
+      channelDescription: 'Task reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+      actions: [
+        const AndroidNotificationAction('complete', 'Tamamla'),
+        const AndroidNotificationAction('snooze5', '5 dk ertele'),
+      ],
+    );
+
+    final darwin = const DarwinNotificationDetails(
+      categoryIdentifier: 'task_actions',
+    );
+
+    final details =
+        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+
+    await _flnp.zonedSchedule(
+      id,
+      title,
+      body,
+      firstTime,
+      details,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.time,
+      payload: payload,
+    );
+  }
+
+  /// Haftalık tekrar eden bildirim
+  static Future<void> scheduleWeekly({
+    required int id,
+    required String title,
+    required String body,
+    required tz.TZDateTime firstTime,
+    String? payload,
+  }) async {
+    final android = AndroidNotificationDetails(
+      'reminder_channel_id',
+      'Reminders',
+      channelDescription: 'Task reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+      actions: [
+        const AndroidNotificationAction('complete', 'Tamamla'),
+        const AndroidNotificationAction('snooze5', '5 dk ertele'),
+      ],
+    );
+
+    final darwin = const DarwinNotificationDetails(
+      categoryIdentifier: 'task_actions',
+    );
+
+    final details =
+        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+
+    await _flnp.zonedSchedule(
+      id,
+      title,
+      body,
+      firstTime,
+      details,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
+      payload: payload,
+    );
+  }
+
+  /// Aylık tekrar eden bildirim
+  static Future<void> scheduleMonthly({
+    required int id,
+    required String title,
+    required String body,
+    required tz.TZDateTime firstTime,
+    String? payload,
+  }) async {
+    final android = AndroidNotificationDetails(
+      'reminder_channel_id',
+      'Reminders',
+      channelDescription: 'Task reminders',
+      importance: Importance.high,
+      priority: Priority.high,
+      actions: [
+        const AndroidNotificationAction('complete', 'Tamamla'),
+        const AndroidNotificationAction('snooze5', '5 dk ertele'),
+      ],
+    );
+
+    final darwin = const DarwinNotificationDetails(
+      categoryIdentifier: 'task_actions',
+    );
+
+    final details =
+        NotificationDetails(android: android, iOS: darwin, macOS: darwin);
+
+    await _flnp.zonedSchedule(
+      id,
+      title,
+      body,
+      firstTime,
+      details,
+      androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
+      uiLocalNotificationDateInterpretation:
+          UILocalNotificationDateInterpretation.absoluteTime,
+      matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
+      payload: payload,
+    );
+  }
+
+  /// Belirli bir bildirimi iptal et
+  static Future<void> cancel(int id) => _flnp.cancel(id);
+}
+
+------------------------------------------------------
+
+-lib/src/ui/home_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../data/db.dart';
+import 'providers.dart';
+import 'new_task_page.dart';
+
+class HomePage extends ConsumerWidget {
+  const HomePage({super.key});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final repo = ref.watch(taskRepoProvider);
+    return Scaffold(
+      appBar: AppBar(title: const Text('Görevler')),
+      body: StreamBuilder<List<Task>>(
+        stream: repo.watchActive(),
+        builder: (context, snap) {
+          final items = snap.data ?? [];
+          if (items.isEmpty) return const Center(child: Text('Henüz görev yok'));
+          return ListView.builder(
+            itemCount: items.length,
+            itemBuilder: (c, i) {
+              final t = items[i];
+              return ListTile(
+                title: Text(t.title),
+                subtitle: t.notes == null ? null : Text(t.notes!),
+              );
+            },
+          );
+        },
+      ),
+      floatingActionButton: FloatingActionButton.extended(
+        onPressed: () async {
+          await Navigator.push(context, MaterialPageRoute(builder: (_) => const NewTaskPage()));
+        },
+        label: const Text('Ekle'),
+        icon: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+------------------------------------------------------
+
+-lib/src/ui/new_task_page.dart
+
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
+import '../data/db.dart';
+import 'providers.dart';
+import 'package:drift/drift.dart' as drift;
+
+
+class NewTaskPage extends ConsumerStatefulWidget {
+  const NewTaskPage({super.key});
+
+  @override
+  ConsumerState<NewTaskPage> createState() => _NewTaskPageState();
+}
+
+class _NewTaskPageState extends ConsumerState<NewTaskPage> {
+  final _title = TextEditingController();
+  final _notes = TextEditingController();
+  DateTime? _picked;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: const Text('Yeni Görev')),
+      body: ListView(
+        padding: const EdgeInsets.all(16),
+        children: [
+          TextField(controller: _title, decoration: const InputDecoration(labelText: 'Başlık')),
+          const SizedBox(height: 8),
+          TextField(controller: _notes, decoration: const InputDecoration(labelText: 'Notlar'), maxLines: 3),
+          const SizedBox(height: 8),
+          ElevatedButton(
+            onPressed: () async {
+              final now = DateTime.now();
+              final date = await showDatePicker(
+                context: context,
+                initialDate: now,
+                firstDate: now,
+                lastDate: DateTime(now.year + 5),
+              );
+              if (date == null) return;
+              final time = await showTimePicker(
+                context: context,
+                initialTime: TimeOfDay.fromDateTime(now.add(const Duration(minutes: 5))),
+              );
+              if (time == null) return;
+              _picked = DateTime(date.year, date.month, date.day, time.hour, time.minute);
+              setState(() {});
+            },
+            child: Text(_picked == null ? 'Tarih & Saat Seç' : _picked.toString()),
+          ),
+          const SizedBox(height: 16),
+          FilledButton(
+            onPressed: _picked == null || _title.text.trim().isEmpty ? null : () async {
+              final taskRepo = ref.read(taskRepoProvider);
+              final reminderRepo = ref.read(reminderRepoProvider);
+              final scheduler = ref.read(schedulerProvider);
+              final time = ref.read(timeServiceProvider);
+
+              final id = const Uuid().v4();
+              final nowUtc = DateTime.now().toUtc();
+
+              // TR örneği: cihaz TZ'si (Europe/Istanbul) varsayımı
+              const tzId = 'Europe/Istanbul';
+              final utc = time.toUtcFromLocal(tzId, _picked!);
+
+              // 1) Görevi ekle
+              await taskRepo.insertTask(TasksCompanion.insert(
+                id: id, title: _title.text.trim(), notes: _notes.text.isEmpty ? const drift.Value.absent() : drift.Value(_notes.text),
+                isCompleted: const drift.Value(false), createdAtUtc: nowUtc,
+              ));
+
+              // 2) Hatırlatmayı ekle
+              final reminderId = const Uuid().v4();
+              final notifId = DateTime.now().millisecondsSinceEpoch % 1000000000; // int id
+              await reminderRepo.insertReminder(RemindersCompanion.insert(
+                id: reminderId,
+                taskId: id,
+                localDateTime: _picked!,
+                timeZoneId: tzId,
+                utcFireAt: utc,
+                notificationId: notifId,
+              ));
+
+              // 3) Bildirimi planla
+              await scheduler.scheduleOneShot(
+                tzId: tzId,
+                localDateTime: _picked!,
+                notificationId: notifId,
+                title: 'Hatırlatma',
+                body: _title.text.trim(),
+              );
+
+              if (mounted) Navigator.pop(context);
+            },
+            child: const Text('Kaydet ve Planla'),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+------------------------------------------------------
+
+-lib/src/ui/providers.dart
+
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../data/db.dart';
+import '../data/repos.dart';
+import '../domain/time_service.dart';
+import '../domain/scheduler_service.dart';
+
+final dbProvider = Provider<AppDb>((ref) => AppDb());
+
+final taskRepoProvider = Provider<TaskRepo>((ref) => TaskRepo(ref.read(dbProvider)));
+final reminderRepoProvider = Provider<ReminderRepo>((ref) => ReminderRepo(ref.read(dbProvider)));
+
+final timeServiceProvider = Provider<TimeService>((ref) => TimeService());
+final schedulerProvider = Provider<SchedulerService>((ref) => SchedulerService(ref.read(timeServiceProvider)));
+
+------------------------------------------------------
+
+-lib/widgets/task_tile.dart
+
+// lib/widgets/task_tile.dart
+import 'package:flutter/material.dart';
+import '../models/task.dart';
+
+class TaskTile extends StatelessWidget {
+  const TaskTile({
+    super.key,
+    required this.task,
+    this.onTap,
+  });
+
+  final Task task;
+  final VoidCallback? onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final scheme = theme.colorScheme;
+
+    final now = DateTime.now();
+    final due = task.due;
+
+    final isOverdue = due != null && !task.done && due.isBefore(now);
+    final isToday = due != null &&
+        DateTime(due.year, due.month, due.day) ==
+            DateTime(now.year, now.month, now.day);
+
+    // Sol vurgu şeridi
+    final sideColor = isOverdue
+        ? Colors.red
+        : (isToday ? scheme.secondary : scheme.outlineVariant);
+
+    // Kart arka planı (bugün olan görevler yumuşak renkli)
+    final bgColor = isToday && !task.done
+        ? scheme.secondaryContainer.withOpacity(0.35)
+        : scheme.surface;
+
+    return Card(
+      margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      elevation: 0,
+      color: bgColor,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: IntrinsicHeight(
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              // Sol vurgu çizgisi
+              Container(
+                width: 4,
+                decoration: BoxDecoration(
+                  color: sideColor,
+                  borderRadius: const BorderRadius.only(
+                    topLeft: Radius.circular(12),
+                    bottomLeft: Radius.circular(12),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Padding(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Başlık satırı (sağda uyarı ikonu ile)
+                      Row(
+                        crossAxisAlignment: CrossAxisAlignment.center,
+                        children: [
+                          Expanded(
+                            child: Text(
+                              task.title,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: theme.textTheme.titleMedium?.copyWith(
+                                decoration: task.done
+                                    ? TextDecoration.lineThrough
+                                    : null,
+                                color: task.done
+                                    ? theme.textTheme.titleMedium?.color
+                                        ?.withOpacity(0.6)
+                                    : (isOverdue
+                                        ? Colors.red.shade700
+                                        : theme.textTheme.titleMedium?.color),
+                              ),
+                            ),
+                          ),
+                          if (isOverdue)
+                            Padding(
+                              padding: const EdgeInsets.only(left: 6),
+                              child: Tooltip(
+                                message: 'Gecikti',
+                                child: Icon(
+                                  Icons.warning_amber_rounded,
+                                  size: 18,
+                                  color: Colors.red.shade600,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+
+                      // not varsa
+                      if ((task.note ?? '').trim().isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          task.note!.trim(),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: theme.textTheme.bodySmall?.copyWith(
+                            color: theme.textTheme.bodySmall?.color
+                                ?.withOpacity(0.75),
+                          ),
+                        ),
+                      ],
+
+                      // chip'ler
+                      const SizedBox(height: 6),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: -4,
+                        children: [
+                          if (task.due != null)
+                            _MiniChip(
+                              icon: Icons.event,
+                              label: _formatDateSmart(task.due!),
+                              color: isOverdue
+                                  ? Colors.red.withOpacity(.15)
+                                  : isToday
+                                      ? scheme.secondaryContainer
+                                      : scheme.surfaceVariant,
+                              onColor: isOverdue
+                                  ? Colors.red.shade700
+                                  : (isToday
+                                      ? scheme.onSecondaryContainer
+                                      : scheme.onSurfaceVariant),
+                            ),
+                          if (task.repeat != RepeatRule.none)
+                            _MiniChip(
+                              icon: Icons.repeat,
+                              label: _repeatText(task.repeat),
+                              color: scheme.tertiaryContainer,
+                              onColor: scheme.onTertiaryContainer,
+                            ),
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MiniChip extends StatelessWidget {
+  const _MiniChip({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onColor,
+  });
+
+  final IconData icon;
+  final String label;
+  final Color color;
+  final Color onColor;
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 14, color: onColor),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: Theme.of(context)
+                .textTheme
+                .labelSmall
+                ?.copyWith(color: onColor),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// -------- helpers --------
+
+String _two(int n) => n.toString().padLeft(2, '0');
+
+String _formatDateSmart(DateTime d) {
+  final now = DateTime.now();
+  bool sameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  if (sameDay(d, now)) {
+    // Bugün: yalnız saat
+    return '${_two(d.hour)}:${_two(d.minute)}';
+  }
+
+  if (d.difference(now).inDays.abs() < 7) {
+    // 1 hafta içinde: gün kısaltması + saat
+    const days = ['Pzt','Sal','Çar','Per','Cum','Cmt','Paz'];
+    return '${days[d.weekday - 1]} ${_two(d.hour)}:${_two(d.minute)}';
+  }
+
+  // Diğer: tam tarih + saat
+  return '${_two(d.day)}.${_two(d.month)}.${d.year} ${_two(d.hour)}:${_two(d.minute)}';
+}
+
+String _repeatText(RepeatRule? r) {
+  switch (r) {
+    case RepeatRule.daily:
+      return 'Günlük';
+    case RepeatRule.weekly:
+      return 'Haftalık';
+    case RepeatRule.monthly:
+      return 'Aylık';
+    case RepeatRule.none:
+    case null:
+      return 'Yok';
+  }
+}
+
+------------------------------------------------------
+
+-lib/main.dart
+
+// lib/main.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:flutter_native_timezone_updated_gradle/flutter_native_timezone.dart';
+import 'package:timezone/data/latest.dart' as tz;
+import 'package:timezone/timezone.dart' as tz;
+
+import 'constants/app_info.dart';
+import 'pages/home_page.dart';
+import 'pages/task_edit_page.dart';
+import 'providers/task_providers.dart';
+import 'src/notifications/notification_service.dart';
+
+final navigatorKey = GlobalKey<NavigatorState>();
+
+Future<void> _initTz() async {
+  tz.initializeTimeZones();
+  final localTz = await FlutterNativeTimezone.getLocalTimezone();
+  tz.setLocalLocation(tz.getLocation(localTz));
+}
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+
+  await _initTz();
+  await NotificationService.init(); // izinler burada istenir
+
+  runApp(const ProviderScope(child: TaskerApp()));
+
+  // 🔔 Bildirime tıklanınca ilgili görevin düzenleme sayfasına git
+  NotificationService.onNotificationTap.listen((payload) async {
+    // olası formatlar:
+    // 1) "taskId:123"
+    // 2) "action:complete;taskId:123"
+    // 3) "action:snooze5;taskId:123"
+
+    String data = payload;
+    String? action;
+    if (payload.startsWith('action:')) {
+      final parts = payload.split(';');
+      action = parts[0].split(':').elementAtOrNull(1);
+      data = parts.elementAtOrNull(1) ?? '';
+    }
+
+    final m = RegExp(r'taskId:(\d+)').firstMatch(data);
+    if (m == null) return;
+
+    final id = int.tryParse(m.group(1)!);
+    if (id == null) return;
+
+    final ctx = navigatorKey.currentContext;
+    if (ctx == null) return;
+
+    final container = ProviderScope.containerOf(ctx);
+    final repo = container.read(taskRepositoryProvider);
+    final task = await repo.getById(id);
+    if (task == null) return;
+
+    if (action == 'complete') {
+      await repo.update(task.copyWith(done: true));
+      await container.read(taskListProvider.notifier).refresh();
+      return;
+    } else if (action == 'snooze5') {
+      final newDue = DateTime.now().add(const Duration(minutes: 5));
+      await repo.update(task.copyWith(due: newDue, done: false));
+      await container.read(taskListProvider.notifier).refresh();
+      return;
+    }
+
+    // aksiyon yoksa => detay sayfasına git
+    Navigator.of(ctx).push(
+      MaterialPageRoute(builder: (_) => TaskEditPage(initial: task)),
+    );
+  });
+}
+
+class TaskerApp extends StatelessWidget {
+  const TaskerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final seed = Colors.indigo;
+    return MaterialApp(
+      title: appName,
+      navigatorKey: navigatorKey,
+      theme: ThemeData(
+        useMaterial3: true,
+        colorSchemeSeed: seed,
+        brightness: Brightness.light,
+        cardTheme: CardThemeData(
+          elevation: 0,
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        ),
+        chipTheme: const ChipThemeData(
+          showCheckmark: false,
+          padding: EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        ),
+        listTileTheme: const ListTileThemeData(
+          contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        ),
+      ),
+      home: const HomePage(),
+    );
+  }
+}
+
+------------------------------------------------------
+
+-pubspec.yaml
+
+name: tasker
+description: "A new Flutter project."
+# The following line prevents the package from being accidentally published to
+# pub.dev using `flutter pub publish`. This is preferred for private packages.
+publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+
+# The following defines the version and build number for your application.
+# A version number is three numbers separated by dots, like 1.2.43
+# followed by an optional build number separated by a +.
+# Both the version and the builder number may be overridden in flutter
+# build by specifying --build-name and --build-number, respectively.
+# In Android, build-name is used as versionName while build-number used as versionCode.
+# Read more about Android versioning at https://developer.android.com/studio/publish/versioning
+# In iOS, build-name is used as CFBundleShortVersionString while build-number is used as CFBundleVersion.
+# Read more about iOS versioning at
+# https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
+# In Windows, build-name is used as the major, minor, and patch parts
+# of the product and file versions while build-number is used as the build suffix.
+version: 1.0.0+2
+
+environment:
+  sdk: ^3.8.1
+
+# Dependencies specify other packages that your package needs in order to work.
+# To automatically upgrade your package dependencies to the latest versions
+# consider running `flutter pub upgrade --major-versions`. Alternatively,
+# dependencies can be manually updated by changing the version numbers below to
+# the latest version available on pub.dev. To see which dependencies have newer
+# versions available, run `flutter pub outdated`.
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_local_notifications: ^17.2.1
+  timezone: ^0.9.2
+  sqflite: ^2.3.0
+  flutter_native_timezone_updated_gradle: ^2.0.3
+  riverpod: ^2.5.1
+  flutter_riverpod: ^2.5.1
+  drift: ^2.20.2
+  drift_flutter: ^0.2.0
+  uuid: ^4.5.1
+  intl: ^0.19.0
+  share_plus: ^10.0.2
+  file_picker: ^8.0.6
+  path_provider: ^2.1.4
+
+  # The following adds the Cupertino Icons font to your application.
+  # Use with the CupertinoIcons class for iOS style icons.
+  cupertino_icons: ^1.0.8
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  drift_dev: ^2.20.2
+  build_runner: ^2.4.13
+  flutter_launcher_icons: ^0.13.1
+
+  # The "flutter_lints" package below contains a set of recommended lints to
+  # encourage good coding practices. The lint set provided by the package is
+  # activated in the `analysis_options.yaml` file located at the root of your
+  # package. See that file for information about deactivating specific lint
+  # rules and activating additional ones.
+  flutter_lints: ^5.0.0
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png" # 👈 kendi ikon dosyanın yolu
+
+# For information on the generic Dart part of this file, see the
+# following page: https://dart.dev/tools/pub/pubspec
+
+# The following section is specific to Flutter packages.
+flutter:
+  assets:
+    - assets/icon/app_icon.png
+
+
+  # The following line ensures that the Material Icons font is
+  # included with your application, so that you can use the icons in
+  # the material Icons class.
+  uses-material-design: true
+
+  # To add assets to your application, add an assets section, like this:
+  # assets:
+  #   - images/a_dot_burr.jpeg
+  #   - images/a_dot_ham.jpeg
+
+  # An image asset can refer to one or more resolution-specific "variants", see
+  # https://flutter.dev/to/resolution-aware-images
+
+  # For details regarding adding assets from package dependencies, see
+  # https://flutter.dev/to/asset-from-package
+
+  # To add custom fonts to your application, add a fonts section here,
+  # in this "flutter" section. Each entry in this list should have a
+  # "family" key with the font family name, and a "fonts" key with a
+  # list giving the asset and other descriptors for the font. For
+  # example:
+  # fonts:
+  #   - family: Schyler
+  #     fonts:
+  #       - asset: fonts/Schyler-Regular.ttf
+  #       - asset: fonts/Schyler-Italic.ttf
+  #         style: italic
+  #   - family: Trajan Pro
+  #     fonts:
+  #       - asset: fonts/TrajanPro.ttf
+  #       - asset: fonts/TrajanPro_Bold.ttf
+  #         weight: 700
+  #
+  # For details regarding fonts from package dependencies,
+  # see https://flutter.dev/to/font-from-package
+
+
+------------------------------------------------------
+
