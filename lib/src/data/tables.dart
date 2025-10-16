@@ -14,6 +14,22 @@ class Tasks extends Table {
   Set<Column> get primaryKey => {id};
 }
 
+@DataClassName('Tag')
+class Tags extends Table {
+  TextColumn get id => text()();
+  TextColumn get name => text().unique()();
+  @override
+  Set<Column> get primaryKey => {id};
+}
+
+class TaskTags extends Table {
+  TextColumn get taskId => text().references(Tasks, #id)();
+  TextColumn get tagId => text().references(Tags, #id)();
+
+  @override
+  Set<Column> get primaryKey => {taskId, tagId};
+}
+
 class Reminders extends Table {
   TextColumn get id => text()(); // uuid
   TextColumn get taskId => text()(); // fk Tasks.id

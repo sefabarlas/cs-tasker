@@ -1,4 +1,5 @@
-// lib/models/task.dart
+import 'package:uuid/uuid.dart';
+
 enum RepeatRule { none, daily, weekly, monthly }
 
 class Task {
@@ -11,6 +12,7 @@ class Task {
   final int sort;
   final DateTime createdAt;
   final DateTime? updatedAt;
+  final List<Tag> tags;
 
   Task({
     this.id,
@@ -22,6 +24,7 @@ class Task {
     this.sort = 0,
     DateTime? createdAt,
     this.updatedAt,
+    this.tags = const [],
   }) : createdAt = createdAt ?? DateTime.now();
 
   Task copyWith({
@@ -34,6 +37,7 @@ class Task {
     int? sort,
     DateTime? createdAt,
     DateTime? updatedAt,
+    List<Tag>? tags,
   }) {
     return Task(
       id: id ?? this.id,
@@ -45,6 +49,7 @@ class Task {
       sort: sort ?? this.sort,
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
+      tags: tags ?? this.tags,
     );
   }
 
@@ -91,6 +96,7 @@ class Task {
       updatedAt: (m['updated_at'] as int?) != null
           ? DateTime.fromMillisecondsSinceEpoch(m['updated_at'] as int)
           : null,
+      tags: [], 
     );
   }
 
@@ -117,6 +123,7 @@ class Task {
       'repeat': repeat.name, // "none", "daily", "weekly", "monthly"
       'done': done,
       'sort': sort,
+      'tags': tags.map((tag) => tag.name).toList(),
     };
   }
 
@@ -146,6 +153,9 @@ class Task {
       return null;
     }
 
+    final tagNames = (m['tags'] as List<dynamic>?)?.cast<String>() ?? [];
+    final tags = tagNames.map((name) => Tag(id: _uuid.v4(), name: name)).toList();
+
     return Task(
       id: parseId(m['id']),
       title: (m['title'] as String?) ?? '',
@@ -154,10 +164,11 @@ class Task {
       repeat: _rep(m['repeat'] as String?),
       done: (m['done'] as bool?) ?? false,
       sort: (m['sort'] as int?) ?? 0,
+      tags: tags,
     );
   }
 
-  static Task fromDrift(dynamic dTask) {
+  static Task fromDrift(dynamic dTask, {List<Tag> tags = const []}) {
     final repeatRule = _repeatFromInt(dTask.repeat as int?);
 
     return Task(
@@ -172,6 +183,25 @@ class Task {
       sort: dTask.sort as int,
       createdAt: dTask.createdAtUtc as DateTime,
       updatedAt: dTask.updatedAtUtc as DateTime?,
+      tags: tags,
     );
   }
+}
+
+const _uuid = Uuid(); // YENİ
+
+class Tag {
+  final String id;
+  final String name;
+
+  Tag({required this.id, required this.name});
+
+  // Eşitlik ve hashCode kontrolü için
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Tag && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
 }

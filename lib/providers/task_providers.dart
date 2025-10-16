@@ -5,18 +5,17 @@ import 'package:tasker/src/ui/providers.dart';
 import '../data/task_repository.dart'; // Yeni Drift tabanlı repo
 import '../models/task.dart';
 
-// --------------- YENİ PROVIDER'LAR ---------------
-
-/// 📦 Drift AppDb provider'ı (lib/src/data/db.dart'tan geliyor)
-// final dbProvider = Provider<AppDb>((ref) => AppDb()); // (Zaten lib/src/ui/providers.dart'ta tanımlı)
-
 /// 🛠️ Task Repository (Drift'i kullanacak)
 final taskRepositoryProvider = Provider<TaskRepository>((ref) {
   final db = ref.read(appDbProvider); // lib/src/data/db.dart'tan
   return TaskRepository(db);
 });
 
-// --------------- TASK LİSTE NOTIFIER ---------------
+// YENİ: Tüm etiketleri getiren provider
+final allTagsProvider = FutureProvider<List<Tag>>((ref) {
+  final repo = ref.watch(taskRepositoryProvider);
+  return repo.getAllTags();
+});
 
 /// Liste + arama + sıralama (Stream'i yönetir)
 final taskListProvider = AsyncNotifierProvider<TaskListNotifier, List<Task>>(

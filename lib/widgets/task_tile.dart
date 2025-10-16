@@ -3,7 +3,11 @@ import 'package:flutter/material.dart';
 import '../models/task.dart';
 
 class TaskTile extends StatelessWidget {
-  const TaskTile({super.key, required this.task, this.onTap});
+  const TaskTile({
+    super.key,
+    required this.task,
+    this.onTap,
+  });
 
   final Task task;
   final VoidCallback? onTap;
@@ -17,17 +21,14 @@ class TaskTile extends StatelessWidget {
     final due = task.due;
 
     final isOverdue = due != null && !task.done && due.isBefore(now);
-    final isToday =
-        due != null &&
+    final isToday = due != null &&
         DateTime(due.year, due.month, due.day) ==
             DateTime(now.year, now.month, now.day);
 
-    // Sol vurgu şeridi
     final sideColor = isOverdue
         ? Colors.red
         : (isToday ? scheme.secondary : scheme.outlineVariant);
 
-    // Kart arka planı (bugün olan görevler yumuşak renkli)
     final bgColor = isToday && !task.done
         ? scheme.secondaryContainer.withOpacity(0.35)
         : scheme.surface;
@@ -43,7 +44,6 @@ class TaskTile extends StatelessWidget {
           child: Row(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
-              // Sol vurgu çizgisi
               Container(
                 width: 4,
                 decoration: BoxDecoration(
@@ -64,7 +64,6 @@ class TaskTile extends StatelessWidget {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      // Başlık satırı (sağda uyarı ikonu ile)
                       Row(
                         crossAxisAlignment: CrossAxisAlignment.center,
                         children: [
@@ -79,10 +78,11 @@ class TaskTile extends StatelessWidget {
                                     : null,
                                 color: task.done
                                     ? theme.textTheme.titleMedium?.color
-                                          ?.withOpacity(0.6)
+                                        ?.withOpacity(0.6)
                                     : (isOverdue
-                                          ? Colors.red.shade700
-                                          : theme.textTheme.titleMedium?.color),
+                                        ? Colors.red.shade700
+                                        : theme
+                                            .textTheme.titleMedium?.color),
                               ),
                             ),
                           ),
@@ -100,8 +100,6 @@ class TaskTile extends StatelessWidget {
                             ),
                         ],
                       ),
-
-                      // not varsa
                       if ((task.note ?? '').trim().isNotEmpty) ...[
                         const SizedBox(height: 4),
                         Text(
@@ -114,12 +112,10 @@ class TaskTile extends StatelessWidget {
                           ),
                         ),
                       ],
-
-                      // chip'ler
                       const SizedBox(height: 6),
                       Wrap(
                         spacing: 8,
-                        runSpacing: -4,
+                        runSpacing: 4, // Etiketler için satır aralığı
                         children: [
                           if (task.due != null)
                             _MiniChip(
@@ -128,13 +124,13 @@ class TaskTile extends StatelessWidget {
                               color: isOverdue
                                   ? Colors.red.withOpacity(.15)
                                   : isToday
-                                  ? scheme.secondaryContainer
-                                  : scheme.surfaceVariant,
+                                      ? scheme.secondaryContainer
+                                      : scheme.surfaceVariant,
                               onColor: isOverdue
                                   ? Colors.red.shade700
                                   : (isToday
-                                        ? scheme.onSecondaryContainer
-                                        : scheme.onSurfaceVariant),
+                                      ? scheme.onSecondaryContainer
+                                      : scheme.onSurfaceVariant),
                             ),
                           if (task.repeat != RepeatRule.none)
                             _MiniChip(
@@ -143,6 +139,14 @@ class TaskTile extends StatelessWidget {
                               color: scheme.tertiaryContainer,
                               onColor: scheme.onTertiaryContainer,
                             ),
+                          ...task.tags.map(
+                            (tag) => _MiniChip(
+                              icon: Icons.label_outline,
+                              label: tag.name,
+                              color: scheme.surfaceVariant,
+                              onColor: scheme.onSurfaceVariant,
+                            ),
+                          ),
                         ],
                       ),
                     ],
@@ -205,17 +209,14 @@ String _formatDateSmart(DateTime d) {
       a.year == b.year && a.month == b.month && a.day == b.day;
 
   if (sameDay(d, now)) {
-    // Bugün: yalnız saat
     return '${_two(d.hour)}:${_two(d.minute)}';
   }
 
   if (d.difference(now).inDays.abs() < 7) {
-    // 1 hafta içinde: gün kısaltması + saat
     const days = ['Pzt', 'Sal', 'Çar', 'Per', 'Cum', 'Cmt', 'Paz'];
     return '${days[d.weekday - 1]} ${_two(d.hour)}:${_two(d.minute)}';
   }
 
-  // Diğer: tam tarih + saat
   return '${_two(d.day)}.${_two(d.month)}.${d.year} ${_two(d.hour)}:${_two(d.minute)}';
 }
 
