@@ -16,18 +16,31 @@ class TaskTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final scheme = theme.colorScheme;
-
     final now = DateTime.now();
     final due = task.due;
-
     final isOverdue = due != null && !task.done && due.isBefore(now);
     final isToday = due != null &&
         DateTime(due.year, due.month, due.day) ==
             DateTime(now.year, now.month, now.day);
 
-    final sideColor = isOverdue
-        ? Colors.red
-        : (isToday ? scheme.secondary : scheme.outlineVariant);
+    // YENİLENDİ: `sideColor` mantığı artık sadece önceliğe odaklanıyor.
+    final Color sideColor;
+    switch (task.priority) {
+      case Priority.high:
+        sideColor = Colors.red.shade700;
+        break;
+      case Priority.medium:
+        sideColor = Colors.orange.shade700;
+        break;
+      case Priority.low:
+        sideColor = Colors.blue.shade700;
+        break;
+      case Priority.none:
+      default:
+        // Öncelik yoksa, sadece "bugün" durumunu belirt, gecikmeyi değil.
+        sideColor = isToday ? scheme.secondary : scheme.outlineVariant;
+        break;
+    }
         
     final bgColor = isToday && !task.done
         ? scheme.secondaryContainer.withOpacity(0.3)
@@ -52,10 +65,7 @@ class TaskTile extends StatelessWidget {
                 width: 5,
                 decoration: BoxDecoration(
                   color: sideColor,
-                  borderRadius: const BorderRadius.only(
-                    topLeft: Radius.circular(11),
-                    bottomLeft: Radius.circular(11),
-                  ),
+                  borderRadius: const BorderRadius.only(topLeft: Radius.circular(11), bottomLeft: Radius.circular(11)),
                 ),
               ),
               Expanded(
@@ -75,9 +85,10 @@ class TaskTile extends StatelessWidget {
                               overflow: TextOverflow.ellipsis,
                               style: theme.textTheme.titleMedium?.copyWith(
                                 decoration: task.done ? TextDecoration.lineThrough : null,
+                                // YENİLENDİ: Başlık rengi, gecikme durumunu belirtmek için kullanılıyor.
                                 color: task.done
-                                    ? theme.textTheme.titleMedium?.color?.withOpacity(0.6)
-                                    : (isOverdue ? Colors.red.shade700 : theme.textTheme.titleMedium?.color),
+                                    ? scheme.outline
+                                    : (isOverdue ? Colors.red.shade700 : scheme.onSurface),
                                 fontWeight: FontWeight.w600,
                               ),
                             ),
@@ -122,12 +133,11 @@ class TaskTile extends StatelessWidget {
                               backgroundColor: scheme.surfaceContainerHighest,
                               textColor: scheme.onSurfaceVariant,
                             ),
-                          // YENİLENDİ: Etiketler artık kenarlıklı ve arka plansız.
                           ...task.tags.map(
                             (tag) => _MiniChip(
                               label: '#${tag.name}',
-                              textColor: scheme.primary, // Kenarlık ve metin rengi
-                              isOutlined: true, // Kenarlıklı stili etkinleştir
+                              textColor: scheme.primary,
+                              isOutlined: true,
                             ),
                           ),
                         ],
@@ -144,22 +154,14 @@ class TaskTile extends StatelessWidget {
   }
 }
 
-// YENİLENDİ: _MiniChip widget'ı hem dolgulu hem kenarlıklı stilleri destekliyor.
+// _MiniChip ve diğer helper fonksiyonları aynı kalıyor...
 class _MiniChip extends StatelessWidget {
-  const _MiniChip({
-    this.icon,
-    required this.label,
-    required this.textColor,
-    this.backgroundColor,
-    this.isOutlined = false,
-  });
-  
+  const _MiniChip({this.icon, required this.label, required this.textColor, this.backgroundColor, this.isOutlined = false});
   final IconData? icon;
   final String label;
   final Color textColor;
   final Color? backgroundColor;
   final bool isOutlined;
-
   @override
   Widget build(BuildContext context) {
     return Container(
@@ -172,21 +174,13 @@ class _MiniChip extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (icon != null) ...[
-            Icon(icon, size: 14, color: textColor),
-            const SizedBox(width: 4),
-          ],
-          Text(
-            label,
-            style: Theme.of(context).textTheme.labelSmall?.copyWith(color: textColor, fontWeight: FontWeight.w500),
-          ),
+          if (icon != null) ...[Icon(icon, size: 14, color: textColor), const SizedBox(width: 4)],
+          Text(label, style: Theme.of(context).textTheme.labelSmall?.copyWith(color: textColor, fontWeight: FontWeight.w500)),
         ],
       ),
     );
   }
 }
-
-
 String _two(int n) => n.toString().padLeft(2, '0');
 String _formatDateSmart(DateTime d) {
   final now = DateTime.now();

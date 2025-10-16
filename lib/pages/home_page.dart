@@ -52,8 +52,22 @@ class _HomePageState extends ConsumerState<HomePage> {
                 if (!context.mounted) return;
                 Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BackupPage()));
               }
+              // Yeni menü seçeneğinin aksiyonu
+              if (v == 'add_test_data') {
+                final repo = ref.read(taskRepositoryProvider);
+                await repo.insertSampleData();
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context)
+                    ..hideCurrentSnackBar()
+                    ..showSnackBar(const SnackBar(content: Text('Test verileri eklendi!')));
+                }
+              }
             },
-            itemBuilder: (_) => const [PopupMenuItem(value: 'backup', child: Text('Yedekle / Geri Yükle'))],
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'backup', child: Text('Yedekle / Geri Yükle')),
+              PopupMenuDivider(), // Ayırıcı
+              PopupMenuItem(value: 'add_test_data', child: Text('Test Verisi Ekle')),
+            ],
           ),
         ],
         bottom: PreferredSize(
@@ -70,14 +84,13 @@ class _HomePageState extends ConsumerState<HomePage> {
                     ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
                   ],
                   selected: {_filter},
-                  // YENİLENDİ: Filtre değiştiğinde "Tamamlananlar" grubunun durumunu ayarla
                   onSelectionChanged: (newSelection) {
                     setState(() {
                       _filter = newSelection.first;
                       if (_filter == TaskFilter.done) {
-                        _collapsed[_SectionType.done] = false; // Tamamlanan sekmesindeyse aç
+                        _collapsed[_SectionType.done] = false;
                       } else {
-                        _collapsed[_SectionType.done] = true; // Diğer sekmelerdeyse kapat
+                        _collapsed[_SectionType.done] = true;
                       }
                     });
                   },
@@ -89,14 +102,15 @@ class _HomePageState extends ConsumerState<HomePage> {
           ),
         ),
       ),
+      // ... (body ve geri kalan kod aynı)
       body: asyncList.when(
         loading: () => const Center(child: CircularProgressIndicator()),
         error: (e, _) => RefreshIndicator(onRefresh: () => ref.read(taskListProvider.notifier).refresh(), child: ListView(physics: const AlwaysScrollableScrollPhysics(), children: [ const SizedBox(height: 80), Center(child: Text('Hata: $e')), const SizedBox(height: 200) ])),
         data: (items) {
           final filtered = _applyFilter(items, _filter);
           final flatList = _applySearch(filtered, _query);
+          final counts = _countsFor(flatList);
           final buckets = _bucketize(flatList);
-          final counts = _countsFor(buckets);
           final entries = _buildEntriesFromBuckets(buckets, collapsed: _collapsed);
           if (flatList.isEmpty) {
             return RefreshIndicator(onRefresh: () => ref.read(taskListProvider.notifier).refresh(), child: ListView(physics: const AlwaysScrollableScrollPhysics(), children: const [ SizedBox(height: 40), _EmptyState(), SizedBox(height: 200) ]));
@@ -165,8 +179,22 @@ class _HomePageState extends ConsumerState<HomePage> {
     return buckets;
   }
   
-  Map<_SectionType, _Count> _countsFor(Map<_SectionType, List<Task>> buckets) {
-    return { for (final e in buckets.entries) e.key: _Count(e.value.length, e.value.where((t) => t.done).length) };
+  Map<_SectionType, _Count> _countsFor(List<Task> allItems) {
+    final now = DateTime.now();
+    DateTime d(DateTime x) => DateTime(x.year, x.month, x.day);
+    final todayDate = d(now);
+    final todayTasks = allItems.where((t) {
+      if (t.due == null) return false;
+      return d(t.due!) == todayDate;
+    }).toList();
+    final todayCount = _Count(todayTasks.length, todayTasks.where((t) => t.done).length);
+    final buckets = _bucketize(allItems);
+    return {
+      _SectionType.today: todayCount,
+      _SectionType.tomorrow: _Count(buckets[_SectionType.tomorrow]!.length, 0),
+      _SectionType.later: _Count(buckets[_SectionType.later]!.length, 0),
+      _SectionType.done: _Count(buckets[_SectionType.done]!.length, buckets[_SectionType.done]!.length),
+    };
   }
 
   List<_Entry> _buildEntriesFromBuckets(Map<_SectionType, List<Task>> buckets, { required Map<_SectionType, bool> collapsed }) {

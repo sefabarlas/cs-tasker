@@ -1,16 +1,16 @@
+// lib/data/task_repository.dart
 import 'package:drift/drift.dart' as d;
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:tasker/src/ui/providers.dart';
 import 'package:uuid/uuid.dart';
 import 'dart:async';
-import '../models/task.dart';
-import '../src/data/db.dart' hide Task, Tag;
+import '../models/task.dart' as model_task;
+import '../src/data/db.dart' hide Task;
 import '../src/notifications/notification_service.dart';
 import 'package:timezone/timezone.dart' as tz;
 
 const _uuid = Uuid();
 
-// Repository'i sağlayan Riverpod Provider'ı güncellendi
 final taskRepositoryProvider = Provider<TaskRepository>((ref) {
   final db = ref.read(appDbProvider);
   return TaskRepository(db);
@@ -21,78 +21,56 @@ class TaskRepository {
 
   TaskRepository(this._db);
 
-  Stream<List<Task>> findAll() {
-    final query = _db.select(_db.tasks)
+  Stream<List<model_task.Task>> findAll() {
+    final taskQuery = _db.select(_db.tasks)
       ..orderBy([
-        (t) => d.OrderingTerm(
-          expression: _db.tasks.done.cast<int>(d.DriftSqlType.int),
-          mode: d.OrderingMode.asc,
-        ),
-
-        (t) => d.OrderingTerm(
-          expression: _db.tasks.sort,
-          mode: d.OrderingMode.asc,
-        ),
+        (t) => d.OrderingTerm(expression: t.done.cast<int>(d.DriftSqlType.int), mode: d.OrderingMode.asc),
+        (t) => d.OrderingTerm(expression: t.sort, mode: d.OrderingMode.asc),
       ]);
-    
-    return query.watch().asyncMap((driftTasks) async {
+
+    return taskQuery.watch().asyncMap((driftTasks) async {
       final taskIds = driftTasks.map((t) => t.id).toList();
+      if (taskIds.isEmpty) {
+        return driftTasks.map((driftTask) => model_task.Task.fromDrift(driftTask, tags: [])).toList();
+      }
+      
       final tagsQuery = _db.select(_db.taskTags).join([
         d.innerJoin(_db.tags, _db.tags.id.equalsExp(_db.taskTags.tagId))
-      ])
-        ..where(_db.taskTags.taskId.isIn(taskIds));
+      ])..where(_db.taskTags.taskId.isIn(taskIds));
 
       final tagLinks = await tagsQuery.get();
-
-      final tagsByTaskId = <String, List<Tag>>{};
+      final tagsByTaskId = <String, List<model_task.Tag>>{};
       for (final row in tagLinks) {
         final tag = row.readTable(_db.tags);
         final taskId = row.readTable(_db.taskTags).taskId;
-        (tagsByTaskId[taskId] ??= [])
-            .add(Tag(id: tag.id, name: tag.name));
+        (tagsByTaskId[taskId] ??= []).add(model_task.Tag(id: tag.id, name: tag.name));
       }
 
       return driftTasks.map((driftTask) {
-        return Task.fromDrift(driftTask,
-            tags: tagsByTaskId[driftTask.id] ?? []);
+        return model_task.Task.fromDrift(driftTask, tags: tagsByTaskId[driftTask.id] ?? []);
       }).toList();
     });
   }
 
-  Future<List<Task>> list() => findAll().first;
+  Future<List<model_task.Task>> list() => findAll().first;
 
-  Future<Task?> getById(String id) async {
+  Future<model_task.Task?> getById(String id) async {
     final taskQuery = _db.select(_db.tasks)..where((t) => t.id.equals(id));
     final taskResult = await taskQuery.getSingleOrNull();
     if (taskResult == null) return null;
 
     final tagsQuery = _db.select(_db.taskTags).join([
       d.innerJoin(_db.tags, _db.tags.id.equalsExp(_db.taskTags.tagId))
-    ])
-      ..where(_db.taskTags.taskId.equals(id));
+    ])..where(_db.taskTags.taskId.equals(id));
     final tagResults = await tagsQuery.get();
-    final tags = tagResults
-        .map((row) => Tag(
-            id: row.readTable(_db.tags).id, name: row.readTable(_db.tags).name))
-        .toList();
-
-    return Task.fromDrift(taskResult, tags: tags);
+    final tags = tagResults.map((row) => model_task.Tag(id: row.readTable(_db.tags).id, name: row.readTable(_db.tags).name)).toList();
+    return model_task.Task.fromDrift(taskResult, tags: tags);
   }
 
-  Future<String> add(Task task) async {
+  Future<String> add(model_task.Task task) async {
     final id = _uuid.v4();
     final now = DateTime.now().toUtc();
-
-    final lastSort = await (_db.select(_db.tasks)
-          ..where((t) => t.done.equals(false))
-          ..orderBy([
-            (t) => d.OrderingTerm(
-                expression: t.sort, mode: d.OrderingMode.desc),
-          ])
-          ..limit(1))
-        .map((row) => row.sort)
-        .getSingleOrNull();
-
+    final lastSort = await (_db.select(_db.tasks)..where((t) => t.done.equals(false))..orderBy([(t) => d.OrderingTerm(expression: t.sort, mode: d.OrderingMode.desc)])..limit(1)).map((row) => row.sort).getSingleOrNull();
     final nextSort = (lastSort ?? 0) + 1000;
 
     final companion = TasksCompanion.insert(
@@ -104,6 +82,7 @@ class TaskRepository {
       repeat: d.Value(task.repeat.index),
       sort: d.Value(nextSort),
       createdAtUtc: now,
+      priority: d.Value(task.priority.index), // YENİ: priority eklendi
     );
 
     await _db.transaction(() async {
@@ -113,11 +92,10 @@ class TaskRepository {
 
     final newTask = task.copyWith(id: id);
     _rescheduleNotificationForTask(newTask);
-
     return id;
   }
 
-  Future<bool> update(Task task) async {
+  Future<bool> update(model_task.Task task) async {
     if (task.id == null) return false;
     final now = DateTime.now().toUtc();
 
@@ -130,179 +108,145 @@ class TaskRepository {
       repeat: d.Value(task.repeat.index),
       sort: d.Value(task.sort),
       updatedAtUtc: d.Value(now),
+      priority: d.Value(task.priority.index), // YENİ: priority eklendi
     );
 
     await _db.transaction(() async {
-      await (_db.update(_db.tasks)..where((t) => t.id.equals(task.id!)))
-          .write(companion);
+      await (_db.update(_db.tasks)..where((t) => t.id.equals(task.id!))).write(companion);
       await _updateTagsForTask(task.id!, task.tags);
     });
 
     _rescheduleNotificationForTask(task);
-
     return true;
   }
 
-  Future<int> delete(String id) async {
-    final count = await (_db.delete(
-      _db.tasks,
-    )..where((t) => t.id.equals(id))).go();
+  // YENİ: Test verilerini eklemek için metod
+  Future<void> insertSampleData() async {
+    // Önce mevcut tüm verileri temizle
+    await deleteAll();
 
-    final notificationId = int.tryParse(id) ?? id.hashCode;
-    NotificationService.cancel(notificationId);
+    // Test için etiket nesneleri
+    final tagIs = model_task.Tag(id: '1', name: 'İş');
+    final tagKisisel = model_task.Tag(id: '2', name: 'Kişisel');
+    final tagAcil = model_task.Tag(id: '3', name: 'Acil');
+    final tagHobi = model_task.Tag(id: '4', name: 'Hobi');
 
-    return count;
-  }
+    // Tarihleri ayarla
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final yesterday = today.subtract(const Duration(days: 1));
+    final tomorrow = today.add(const Duration(days: 1));
+    final nextWeek = today.add(const Duration(days: 7));
 
-  Future<int> deleteModel(Task t) async {
-    if (t.id == null) return 0;
-    return delete(t.id!);
-  }
-
-  Future<void> deleteAll() async {
-    await _db.delete(_db.tasks).go();
-  }
-
-  Future<void> reorder(List<Task> tasks) async {
-    await _db.transaction(() async {
-      for (final task in tasks) {
-        if (!task.done && task.id != null) {
-          await (_db.update(_db.tasks)..where((t) => t.id.equals(task.id!)))
-              .write(TasksCompanion(sort: d.Value(task.sort)));
-        }
-      }
-    });
-  }
-
-  Future<List<Tag>> getAllTags() async {
-    final driftTags = await _db.select(_db.tags).get();
-    return driftTags
-        .map((tag) => Tag(id: tag.id, name: tag.name))
-        .toList();
-  }
-
-  Future<void> _updateTagsForTask(String taskId, List<Tag> tags) async {
-    // Önce mevcut ilişkileri sil
-    await (_db.delete(_db.taskTags)..where((t) => t.taskId.equals(taskId))).go();
-
-    if (tags.isEmpty) return;
+    final List<model_task.Task> sampleTasks = [
+      model_task.Task(title: 'Müşteri raporunu gönder', note: 'Q3 satış verilerini içeren acil rapor.', priority: model_task.Priority.high, due: yesterday.add(const Duration(hours: 17)), tags: [tagIs, tagAcil], done: false),
+      model_task.Task(title: 'Proje sunumunu hazırla', note: 'Saat 14:00 toplantısı için son hazırlıklar.', priority: model_task.Priority.high, due: today.add(const Duration(hours: 11)), tags: [tagIs], done: false),
+      model_task.Task(title: 'Ekip toplantısı notlarını paylaş', priority: model_task.Priority.medium, due: today.add(const Duration(hours: 10)), tags: [tagIs], done: true),
+      model_task.Task(title: 'Doktor randevusunu onayla', note: 'Saat 16:30 için olan randevuyu ara ve onayla.', priority: model_task.Priority.medium, due: tomorrow.add(const Duration(hours: 16, minutes: 30)), tags: [tagKisisel], done: false),
+      model_task.Task(title: 'Kütüphaneden kitapları iade et', priority: model_task.Priority.low, due: nextWeek.add(const Duration(hours: 12)), tags: [tagKisisel, tagHobi], done: false),
+      model_task.Task(title: 'Yeni Flutter paketlerini araştır', note: 'State management ve animasyon için yeni çözümler.', priority: model_task.Priority.low, tags: [tagHobi], done: false),
+      model_task.Task(title: 'Günlük yedeklemeyi kontrol et', priority: model_task.Priority.none, repeat: model_task.RepeatRule.daily, due: today.add(const Duration(hours: 22)), tags: [tagIs], done: false),
+      model_task.Task(title: 'Market alışverişi yap', note: 'Süt, ekmek, yumurta', priority: model_task.Priority.none, tags: [tagKisisel], done: false),
+      model_task.Task(title: 'Faturaları öde', priority: model_task.Priority.medium, due: today.subtract(const Duration(days: 5)), tags: [tagKisisel], done: true),
+    ];
     
-    // Gelen etiketlerin ID'lerini alıp veritabanında doğrula/oluştur
+    // Her bir görevi veritabanına ekle
+    for (final task in sampleTasks) {
+      await add(task);
+    }
+  }
+  
+  Future<List<model_task.Tag>> getAllTags() async {
+    final driftTags = await (_db.select(_db.tags)..orderBy([(t) => d.OrderingTerm(expression: t.name)])).get();
+    return driftTags.map((tag) => model_task.Tag(id: tag.id, name: tag.name)).toList();
+  }
+
+  Future<void> _updateTagsForTask(String taskId, List<model_task.Tag> tags) async {
+    await (_db.delete(_db.taskTags)..where((t) => t.taskId.equals(taskId))).go();
+    if (tags.isEmpty) return;
     final tagIdsToLink = <String>[];
     for (final tagModel in tags) {
-      // Etiketi ismine göre veritabanında ara
       final existingTag = await (_db.select(_db.tags)..where((t) => t.name.equals(tagModel.name))).getSingleOrNull();
-
       if (existingTag != null) {
-        // Etiket zaten varsa, onun ID'sini kullan
         tagIdsToLink.add(existingTag.id);
       } else {
-        // Etiket yoksa, yenisini oluştur
         final newTag = await createTag(tagModel.name);
         tagIdsToLink.add(newTag.id);
       }
     }
-
-    // Yeni ilişkileri ekle
     await _db.batch((batch) {
-      batch.insertAll(
-          _db.taskTags,
-          tagIdsToLink.map((tagId) =>
-              TaskTagsCompanion.insert(taskId: taskId, tagId: tagId)));
+      batch.insertAll(_db.taskTags, tagIdsToLink.map((tagId) => TaskTagsCompanion.insert(taskId: taskId, tagId: tagId)));
     });
   }
 
-  Future<Tag> createTag(String name) async {
+  Future<model_task.Tag> createTag(String name) async {
+    final trimmedName = name.trim();
+    final existing = await (_db.select(_db.tags)..where((t) => t.name.equals(trimmedName))).getSingleOrNull();
+    if (existing != null) {
+      return model_task.Tag(id: existing.id, name: existing.name);
+    }
     final id = _uuid.v4();
-    final companion = TagsCompanion.insert(id: id, name: name.trim());
+    final companion = TagsCompanion.insert(id: id, name: trimmedName);
     await _db.into(_db.tags).insert(companion);
-    return Tag(id: id, name: name.trim());
+    return model_task.Tag(id: id, name: trimmedName);
   }
 
-  /// Görevin durumuna göre bildirimleri yeniden planlar veya iptal eder.
-  void _rescheduleNotificationForTask(Task task) {
+  Future<int> delete(String id) async {
+    final count = await (_db.delete(_db.tasks)..where((t) => t.id.equals(id))).go();
+    final notificationId = id.hashCode;
+    NotificationService.cancel(notificationId);
+    await (_db.delete(_db.taskTags)..where((t) => t.taskId.equals(id))).go();
+    return count;
+  }
+
+  Future<void> deleteAll() async {
+    await _db.delete(_db.taskTags).go();
+    await _db.delete(_db.tasks).go();
+    await _db.delete(_db.tags).go();
+  }
+
+  Future<void> reorder(List<model_task.Task> tasks) async {
+    await _db.transaction(() async {
+      for (final task in tasks) {
+        if (!task.done && task.id != null) {
+          await (_db.update(_db.tasks)..where((t) => t.id.equals(task.id!))).write(TasksCompanion(sort: d.Value(task.sort)));
+        }
+      }
+    });
+  }
+
+  void _rescheduleNotificationForTask(model_task.Task task) {
     if (task.id == null) return;
-
-    final notificationId = int.tryParse(task.id!) ?? task.id.hashCode;
-
+    final notificationId = task.id.hashCode;
     if (task.due == null || task.done) {
       NotificationService.cancel(notificationId);
       return;
     }
-
     DateTime due = task.due!;
     final now = DateTime.now();
     bool shouldReschedule = false;
-
-    // Eğer bitiş tarihi geçmişse ve tekrar kuralı varsa, tarihi ileri al
-    if (due.isBefore(now) && task.repeat != RepeatRule.none) {
+    if (due.isBefore(now) && task.repeat != model_task.RepeatRule.none) {
       while (due.isBefore(now)) {
         switch (task.repeat) {
-          case RepeatRule.daily:
-            due = due.add(const Duration(days: 1));
-            break;
-          case RepeatRule.weekly:
-            due = due.add(const Duration(days: 7));
-            break;
-          case RepeatRule.monthly:
-            // Ay sonu sorunlarını ele al
-            due = DateTime(
-              due.year,
-              due.month + 1,
-              due.day,
-              due.hour,
-              due.minute,
-            );
-            break;
-          case RepeatRule.none:
-            break; // should not happen
+          case model_task.RepeatRule.daily: due = due.add(const Duration(days: 1)); break;
+          case model_task.RepeatRule.weekly: due = due.add(const Duration(days: 7)); break;
+          case model_task.RepeatRule.monthly: due = DateTime(due.year, due.month + 1, due.day, due.hour, due.minute); break;
+          case model_task.RepeatRule.none: break;
         }
         shouldReschedule = true;
       }
     }
-
     if (shouldReschedule) {
-      // Tarih ileri alındıysa, update metodu zaten reschedule'ı tekrar çağıracak.
       update(task.copyWith(due: due));
       return;
     }
-
     final tzWhen = tz.TZDateTime.from(due, tz.local);
-
-    // Normal planlama
+    final payload = 'taskId:${task.id}';
     switch (task.repeat) {
-      case RepeatRule.none:
-        NotificationService.scheduleAt(
-          id: notificationId,
-          title: task.title,
-          body: task.note,
-          when: tzWhen,
-        );
-        break;
-      case RepeatRule.daily:
-        NotificationService.scheduleDaily(
-          id: notificationId,
-          title: task.title,
-          body: task.note,
-          firstTime: tzWhen,
-        );
-        break;
-      case RepeatRule.weekly:
-        NotificationService.scheduleWeekly(
-          id: notificationId,
-          title: task.title,
-          body: task.note,
-          firstTime: tzWhen,
-        );
-        break;
-      case RepeatRule.monthly:
-        NotificationService.scheduleMonthly(
-          id: notificationId,
-          title: task.title,
-          body: task.note,
-          firstTime: tzWhen,
-        );
-        break;
+      case model_task.RepeatRule.none: NotificationService.scheduleAt(id: notificationId, title: task.title, body: task.note, when: tzWhen, payload: payload); break;
+      case model_task.RepeatRule.daily: NotificationService.scheduleDaily(id: notificationId, title: task.title, body: task.note, firstTime: tzWhen, payload: payload); break;
+      case model_task.RepeatRule.weekly: NotificationService.scheduleWeekly(id: notificationId, title: task.title, body: task.note, firstTime: tzWhen, payload: payload); break;
+      case model_task.RepeatRule.monthly: NotificationService.scheduleMonthly(id: notificationId, title: task.title, body: task.note, firstTime: tzWhen, payload: payload); break;
     }
   }
 }

@@ -77,6 +77,18 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
     requiredDuringInsert: false,
     defaultValue: const Constant(0),
   );
+  static const VerificationMeta _priorityMeta = const VerificationMeta(
+    'priority',
+  );
+  @override
+  late final GeneratedColumn<int> priority = GeneratedColumn<int>(
+    'priority',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
   static const VerificationMeta _createdAtUtcMeta = const VerificationMeta(
     'createdAtUtc',
   );
@@ -108,6 +120,7 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
     due,
     repeat,
     sort,
+    priority,
     createdAtUtc,
     updatedAtUtc,
   ];
@@ -164,6 +177,12 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
       context.handle(
         _sortMeta,
         sort.isAcceptableOrUnknown(data['sort']!, _sortMeta),
+      );
+    }
+    if (data.containsKey('priority')) {
+      context.handle(
+        _priorityMeta,
+        priority.isAcceptableOrUnknown(data['priority']!, _priorityMeta),
       );
     }
     if (data.containsKey('created_at_utc')) {
@@ -223,6 +242,10 @@ class $TasksTable extends Tasks with TableInfo<$TasksTable, Task> {
         DriftSqlType.int,
         data['${effectivePrefix}sort'],
       )!,
+      priority: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}priority'],
+      )!,
       createdAtUtc: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at_utc'],
@@ -248,6 +271,7 @@ class Task extends DataClass implements Insertable<Task> {
   final int? due;
   final int repeat;
   final int sort;
+  final int priority;
   final DateTime createdAtUtc;
   final DateTime? updatedAtUtc;
   const Task({
@@ -258,6 +282,7 @@ class Task extends DataClass implements Insertable<Task> {
     this.due,
     required this.repeat,
     required this.sort,
+    required this.priority,
     required this.createdAtUtc,
     this.updatedAtUtc,
   });
@@ -275,6 +300,7 @@ class Task extends DataClass implements Insertable<Task> {
     }
     map['repeat'] = Variable<int>(repeat);
     map['sort'] = Variable<int>(sort);
+    map['priority'] = Variable<int>(priority);
     map['created_at_utc'] = Variable<DateTime>(createdAtUtc);
     if (!nullToAbsent || updatedAtUtc != null) {
       map['updated_at_utc'] = Variable<DateTime>(updatedAtUtc);
@@ -293,6 +319,7 @@ class Task extends DataClass implements Insertable<Task> {
       due: due == null && nullToAbsent ? const Value.absent() : Value(due),
       repeat: Value(repeat),
       sort: Value(sort),
+      priority: Value(priority),
       createdAtUtc: Value(createdAtUtc),
       updatedAtUtc: updatedAtUtc == null && nullToAbsent
           ? const Value.absent()
@@ -313,6 +340,7 @@ class Task extends DataClass implements Insertable<Task> {
       due: serializer.fromJson<int?>(json['due']),
       repeat: serializer.fromJson<int>(json['repeat']),
       sort: serializer.fromJson<int>(json['sort']),
+      priority: serializer.fromJson<int>(json['priority']),
       createdAtUtc: serializer.fromJson<DateTime>(json['createdAtUtc']),
       updatedAtUtc: serializer.fromJson<DateTime?>(json['updatedAtUtc']),
     );
@@ -328,6 +356,7 @@ class Task extends DataClass implements Insertable<Task> {
       'due': serializer.toJson<int?>(due),
       'repeat': serializer.toJson<int>(repeat),
       'sort': serializer.toJson<int>(sort),
+      'priority': serializer.toJson<int>(priority),
       'createdAtUtc': serializer.toJson<DateTime>(createdAtUtc),
       'updatedAtUtc': serializer.toJson<DateTime?>(updatedAtUtc),
     };
@@ -341,6 +370,7 @@ class Task extends DataClass implements Insertable<Task> {
     Value<int?> due = const Value.absent(),
     int? repeat,
     int? sort,
+    int? priority,
     DateTime? createdAtUtc,
     Value<DateTime?> updatedAtUtc = const Value.absent(),
   }) => Task(
@@ -351,6 +381,7 @@ class Task extends DataClass implements Insertable<Task> {
     due: due.present ? due.value : this.due,
     repeat: repeat ?? this.repeat,
     sort: sort ?? this.sort,
+    priority: priority ?? this.priority,
     createdAtUtc: createdAtUtc ?? this.createdAtUtc,
     updatedAtUtc: updatedAtUtc.present ? updatedAtUtc.value : this.updatedAtUtc,
   );
@@ -363,6 +394,7 @@ class Task extends DataClass implements Insertable<Task> {
       due: data.due.present ? data.due.value : this.due,
       repeat: data.repeat.present ? data.repeat.value : this.repeat,
       sort: data.sort.present ? data.sort.value : this.sort,
+      priority: data.priority.present ? data.priority.value : this.priority,
       createdAtUtc: data.createdAtUtc.present
           ? data.createdAtUtc.value
           : this.createdAtUtc,
@@ -382,6 +414,7 @@ class Task extends DataClass implements Insertable<Task> {
           ..write('due: $due, ')
           ..write('repeat: $repeat, ')
           ..write('sort: $sort, ')
+          ..write('priority: $priority, ')
           ..write('createdAtUtc: $createdAtUtc, ')
           ..write('updatedAtUtc: $updatedAtUtc')
           ..write(')'))
@@ -397,6 +430,7 @@ class Task extends DataClass implements Insertable<Task> {
     due,
     repeat,
     sort,
+    priority,
     createdAtUtc,
     updatedAtUtc,
   );
@@ -411,6 +445,7 @@ class Task extends DataClass implements Insertable<Task> {
           other.due == this.due &&
           other.repeat == this.repeat &&
           other.sort == this.sort &&
+          other.priority == this.priority &&
           other.createdAtUtc == this.createdAtUtc &&
           other.updatedAtUtc == this.updatedAtUtc);
 }
@@ -423,6 +458,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
   final Value<int?> due;
   final Value<int> repeat;
   final Value<int> sort;
+  final Value<int> priority;
   final Value<DateTime> createdAtUtc;
   final Value<DateTime?> updatedAtUtc;
   final Value<int> rowid;
@@ -434,6 +470,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
     this.due = const Value.absent(),
     this.repeat = const Value.absent(),
     this.sort = const Value.absent(),
+    this.priority = const Value.absent(),
     this.createdAtUtc = const Value.absent(),
     this.updatedAtUtc = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -446,6 +483,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
     this.due = const Value.absent(),
     this.repeat = const Value.absent(),
     this.sort = const Value.absent(),
+    this.priority = const Value.absent(),
     required DateTime createdAtUtc,
     this.updatedAtUtc = const Value.absent(),
     this.rowid = const Value.absent(),
@@ -460,6 +498,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
     Expression<int>? due,
     Expression<int>? repeat,
     Expression<int>? sort,
+    Expression<int>? priority,
     Expression<DateTime>? createdAtUtc,
     Expression<DateTime>? updatedAtUtc,
     Expression<int>? rowid,
@@ -472,6 +511,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
       if (due != null) 'due': due,
       if (repeat != null) 'repeat': repeat,
       if (sort != null) 'sort': sort,
+      if (priority != null) 'priority': priority,
       if (createdAtUtc != null) 'created_at_utc': createdAtUtc,
       if (updatedAtUtc != null) 'updated_at_utc': updatedAtUtc,
       if (rowid != null) 'rowid': rowid,
@@ -486,6 +526,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
     Value<int?>? due,
     Value<int>? repeat,
     Value<int>? sort,
+    Value<int>? priority,
     Value<DateTime>? createdAtUtc,
     Value<DateTime?>? updatedAtUtc,
     Value<int>? rowid,
@@ -498,6 +539,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
       due: due ?? this.due,
       repeat: repeat ?? this.repeat,
       sort: sort ?? this.sort,
+      priority: priority ?? this.priority,
       createdAtUtc: createdAtUtc ?? this.createdAtUtc,
       updatedAtUtc: updatedAtUtc ?? this.updatedAtUtc,
       rowid: rowid ?? this.rowid,
@@ -528,6 +570,9 @@ class TasksCompanion extends UpdateCompanion<Task> {
     if (sort.present) {
       map['sort'] = Variable<int>(sort.value);
     }
+    if (priority.present) {
+      map['priority'] = Variable<int>(priority.value);
+    }
     if (createdAtUtc.present) {
       map['created_at_utc'] = Variable<DateTime>(createdAtUtc.value);
     }
@@ -550,6 +595,7 @@ class TasksCompanion extends UpdateCompanion<Task> {
           ..write('due: $due, ')
           ..write('repeat: $repeat, ')
           ..write('sort: $sort, ')
+          ..write('priority: $priority, ')
           ..write('createdAtUtc: $createdAtUtc, ')
           ..write('updatedAtUtc: $updatedAtUtc, ')
           ..write('rowid: $rowid')
@@ -1481,6 +1527,7 @@ typedef $$TasksTableCreateCompanionBuilder =
       Value<int?> due,
       Value<int> repeat,
       Value<int> sort,
+      Value<int> priority,
       required DateTime createdAtUtc,
       Value<DateTime?> updatedAtUtc,
       Value<int> rowid,
@@ -1494,6 +1541,7 @@ typedef $$TasksTableUpdateCompanionBuilder =
       Value<int?> due,
       Value<int> repeat,
       Value<int> sort,
+      Value<int> priority,
       Value<DateTime> createdAtUtc,
       Value<DateTime?> updatedAtUtc,
       Value<int> rowid,
@@ -1563,6 +1611,11 @@ class $$TasksTableFilterComposer extends Composer<_$AppDb, $TasksTable> {
 
   ColumnFilters<int> get sort => $composableBuilder(
     column: $table.sort,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get priority => $composableBuilder(
+    column: $table.priority,
     builder: (column) => ColumnFilters(column),
   );
 
@@ -1645,6 +1698,11 @@ class $$TasksTableOrderingComposer extends Composer<_$AppDb, $TasksTable> {
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<int> get priority => $composableBuilder(
+    column: $table.priority,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get createdAtUtc => $composableBuilder(
     column: $table.createdAtUtc,
     builder: (column) => ColumnOrderings(column),
@@ -1684,6 +1742,9 @@ class $$TasksTableAnnotationComposer extends Composer<_$AppDb, $TasksTable> {
 
   GeneratedColumn<int> get sort =>
       $composableBuilder(column: $table.sort, builder: (column) => column);
+
+  GeneratedColumn<int> get priority =>
+      $composableBuilder(column: $table.priority, builder: (column) => column);
 
   GeneratedColumn<DateTime> get createdAtUtc => $composableBuilder(
     column: $table.createdAtUtc,
@@ -1756,6 +1817,7 @@ class $$TasksTableTableManager
                 Value<int?> due = const Value.absent(),
                 Value<int> repeat = const Value.absent(),
                 Value<int> sort = const Value.absent(),
+                Value<int> priority = const Value.absent(),
                 Value<DateTime> createdAtUtc = const Value.absent(),
                 Value<DateTime?> updatedAtUtc = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1767,6 +1829,7 @@ class $$TasksTableTableManager
                 due: due,
                 repeat: repeat,
                 sort: sort,
+                priority: priority,
                 createdAtUtc: createdAtUtc,
                 updatedAtUtc: updatedAtUtc,
                 rowid: rowid,
@@ -1780,6 +1843,7 @@ class $$TasksTableTableManager
                 Value<int?> due = const Value.absent(),
                 Value<int> repeat = const Value.absent(),
                 Value<int> sort = const Value.absent(),
+                Value<int> priority = const Value.absent(),
                 required DateTime createdAtUtc,
                 Value<DateTime?> updatedAtUtc = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
@@ -1791,6 +1855,7 @@ class $$TasksTableTableManager
                 due: due,
                 repeat: repeat,
                 sort: sort,
+                priority: priority,
                 createdAtUtc: createdAtUtc,
                 updatedAtUtc: updatedAtUtc,
                 rowid: rowid,

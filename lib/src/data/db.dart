@@ -1,3 +1,4 @@
+// lib/src/data/db.dart
 import 'dart:io';
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
@@ -10,23 +11,25 @@ part 'db.g.dart';
 @DriftDatabase(tables: [Tasks, Reminders, Tags, TaskTags])
 class AppDb extends _$AppDb {
   AppDb() : super(_open());
-  
+
+  // YENİ: Şema versiyonu 3'e yükseltildi
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration {
     return MigrationStrategy(
       onCreate: (m) async {
-        // Tüm tabloları sıfırdan oluştur
         await m.createAll();
       },
       onUpgrade: (m, from, to) async {
-        // Versiyon 1'den 2'ye geçerken
         if (from == 1) {
-          // Yeni eklediğimiz iki tabloyu oluştur
           await m.createTable(tags);
           await m.createTable(taskTags);
+        }
+        // YENİ: Versiyon 2'den 3'e geçerken Tasks tablosuna `priority` sütununu ekle
+        if (from == 2) {
+          await m.addColumn(tasks, tasks.priority as GeneratedColumn<Object>);
         }
       },
     );

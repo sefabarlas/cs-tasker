@@ -1,5 +1,25 @@
 import 'package:uuid/uuid.dart';
 
+const _uuid = Uuid();
+
+// YENİ: Öncelik seviyeleri için enum eklendi
+enum Priority { none, low, medium, high }
+
+class Tag {
+  final String id;
+  final String name;
+
+  Tag({required this.id, required this.name});
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is Tag && runtimeType == other.runtimeType && id == other.id;
+
+  @override
+  int get hashCode => id.hashCode;
+}
+
 enum RepeatRule { none, daily, weekly, monthly }
 
 class Task {
@@ -13,6 +33,7 @@ class Task {
   final DateTime createdAt;
   final DateTime? updatedAt;
   final List<Tag> tags;
+  final Priority priority; // YENİ: Priority alanı eklendi
 
   Task({
     this.id,
@@ -25,6 +46,7 @@ class Task {
     DateTime? createdAt,
     this.updatedAt,
     this.tags = const [],
+    this.priority = Priority.none, // YENİ: Varsayılan değer atandı
   }) : createdAt = createdAt ?? DateTime.now();
 
   Task copyWith({
@@ -38,6 +60,7 @@ class Task {
     DateTime? createdAt,
     DateTime? updatedAt,
     List<Tag>? tags,
+    Priority? priority, // YENİ
   }) {
     return Task(
       id: id ?? this.id,
@@ -50,68 +73,36 @@ class Task {
       createdAt: createdAt ?? this.createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
       tags: tags ?? this.tags,
+      priority: priority ?? this.priority, // YENİ
     );
   }
 
+  // Geri kalan metodlar aynı...
   static RepeatRule _repeatFromInt(int? v) {
     switch (v) {
-      case 1:
-        return RepeatRule.daily;
-      case 2:
-        return RepeatRule.weekly;
-      case 3:
-        return RepeatRule.monthly;
-      default:
-        return RepeatRule.none;
+      case 1: return RepeatRule.daily;
+      case 2: return RepeatRule.weekly;
+      case 3: return RepeatRule.monthly;
+      default: return RepeatRule.none;
     }
   }
 
   static int _repeatToInt(RepeatRule r) {
     switch (r) {
-      case RepeatRule.daily:
-        return 1;
-      case RepeatRule.weekly:
-        return 2;
-      case RepeatRule.monthly:
-        return 3;
-      case RepeatRule.none:
-        return 0;
+      case RepeatRule.daily: return 1;
+      case RepeatRule.weekly: return 2;
+      case RepeatRule.monthly: return 3;
+      case RepeatRule.none: return 0;
     }
   }
 
-  factory Task.fromMap(Map<String, Object?> m) {
-    return Task(
-      id: m['id'] as String?,
-      title: m['title'] as String,
-      note: m['note'] as String?,
-      due: (m['due'] as int?) != null
-          ? DateTime.fromMillisecondsSinceEpoch(m['due'] as int)
-          : null,
-      repeat: _repeatFromInt(m['repeat'] as int?),
-      done: (m['done'] as int? ?? 0) == 1,
-      sort: m['sort'] as int? ?? 0,
-      createdAt: DateTime.fromMillisecondsSinceEpoch(
-        (m['created_at'] as int?) ?? DateTime.now().millisecondsSinceEpoch,
-      ),
-      updatedAt: (m['updated_at'] as int?) != null
-          ? DateTime.fromMillisecondsSinceEpoch(m['updated_at'] as int)
-          : null,
-      tags: [], 
-    );
+  // YENİ: Priority enum'ını integer'a ve tersine çeviren yardımcı metodlar
+  static Priority _priorityFromInt(int? v) {
+    return Priority.values[v ?? 0];
   }
 
-  Map<String, Object?> toMap() {
-    return {
-      'id': id,
-      'title': title,
-      'note': note,
-      'due': due?.millisecondsSinceEpoch,
-      'repeat': _repeatToInt(repeat),
-      'done': done ? 1 : 0,
-      'sort': sort,
-      'created_at': createdAt.millisecondsSinceEpoch,
-      'updated_at': updatedAt?.millisecondsSinceEpoch,
-    };
+  static int _priorityToInt(Priority p) {
+    return p.index;
   }
 
   Map<String, Object?> toExportJson() {
@@ -120,39 +111,42 @@ class Task {
       'title': title,
       'note': note,
       'due': due?.toIso8601String(),
-      'repeat': repeat.name, // "none", "daily", "weekly", "monthly"
+      'repeat': repeat.name,
       'done': done,
       'sort': sort,
       'tags': tags.map((tag) => tag.name).toList(),
+      'priority': priority.name, // YENİ: Yedeklemeye eklendi
     };
   }
 
   static Task fromExportJson(Map<String, Object?> m) {
     RepeatRule _rep(String? s) {
       switch (s) {
-        case 'daily':
-          return RepeatRule.daily;
-        case 'weekly':
-          return RepeatRule.weekly;
-        case 'monthly':
-          return RepeatRule.monthly;
-        default:
-          return RepeatRule.none;
+        case 'daily': return RepeatRule.daily;
+        case 'weekly': return RepeatRule.weekly;
+        case 'monthly': return RepeatRule.monthly;
+        default: return RepeatRule.none;
       }
     }
-
+    // YENİ: Yedekten okurken priority'yi de al
+    Priority _pri(String? s) {
+      switch (s) {
+        case 'low': return Priority.low;
+        case 'medium': return Priority.medium;
+        case 'high': return Priority.high;
+        default: return Priority.none;
+      }
+    }
     DateTime? parseDue(String? iso) {
       if (iso == null || iso.isEmpty) return null;
       return DateTime.tryParse(iso);
     }
-
     String? parseId(Object? rawId) {
       if (rawId == null) return null;
       if (rawId is int) return rawId.toString();
       if (rawId is String) return rawId;
       return null;
     }
-
     final tagNames = (m['tags'] as List<dynamic>?)?.cast<String>() ?? [];
     final tags = tagNames.map((name) => Tag(id: _uuid.v4(), name: name)).toList();
 
@@ -165,43 +159,24 @@ class Task {
       done: (m['done'] as bool?) ?? false,
       sort: (m['sort'] as int?) ?? 0,
       tags: tags,
+      priority: _pri(m['priority'] as String?), // YENİ
     );
   }
 
   static Task fromDrift(dynamic dTask, {List<Tag> tags = const []}) {
     final repeatRule = _repeatFromInt(dTask.repeat as int?);
-
     return Task(
       id: dTask.id as String?,
       title: dTask.title as String,
       note: dTask.notes as String?,
-      due: (dTask.due as int?) != null
-          ? DateTime.fromMillisecondsSinceEpoch(dTask.due as int)
-          : null,
+      due: (dTask.due as int?) != null ? DateTime.fromMillisecondsSinceEpoch(dTask.due as int) : null,
       repeat: repeatRule,
       done: dTask.done as bool,
       sort: dTask.sort as int,
       createdAt: dTask.createdAtUtc as DateTime,
       updatedAt: dTask.updatedAtUtc as DateTime?,
       tags: tags,
+      priority: _priorityFromInt(dTask.priority as int?), // YENİ
     );
   }
-}
-
-const _uuid = Uuid(); // YENİ
-
-class Tag {
-  final String id;
-  final String name;
-
-  Tag({required this.id, required this.name});
-
-  // Eşitlik ve hashCode kontrolü için
-  @override
-  bool operator ==(Object other) =>
-      identical(this, other) ||
-      other is Tag && runtimeType == other.runtimeType && id == other.id;
-
-  @override
-  int get hashCode => id.hashCode;
 }
