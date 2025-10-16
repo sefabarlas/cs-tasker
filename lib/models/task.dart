@@ -139,8 +139,15 @@ class Task {
       return DateTime.tryParse(iso);
     }
 
+    String? parseId(Object? rawId) {
+      if (rawId == null) return null;
+      if (rawId is int) return rawId.toString();
+      if (rawId is String) return rawId;
+      return null;
+    }
+
     return Task(
-      id: m['id'] as String?,
+      id: parseId(m['id']),
       title: (m['title'] as String?) ?? '',
       note: m['note'] as String?,
       due: parseDue(m['due'] as String?),
