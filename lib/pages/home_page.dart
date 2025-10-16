@@ -40,19 +40,12 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   Widget build(BuildContext context) {
     final asyncList = ref.watch(taskListProvider);
-
     return Scaffold(
       appBar: AppBar(
         title: const Text('Görevler'),
         centerTitle: false,
         actions: [
-          IconButton(
-            tooltip: 'Hakkında',
-            icon: const Icon(Icons.info_outline),
-            onPressed: () {
-              Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AboutPage()));
-            },
-          ),
+          IconButton(tooltip: 'Hakkında', icon: const Icon(Icons.info_outline), onPressed: () => Navigator.of(context).push(MaterialPageRoute(builder: (_) => const AboutPage()))),
           PopupMenuButton<String>(
             onSelected: (v) async {
               if (v == 'backup') {
@@ -60,9 +53,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                 Navigator.of(context).push(MaterialPageRoute(builder: (_) => const BackupPage()));
               }
             },
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'backup', child: Text('Yedekle / Geri Yükle')),
-            ],
+            itemBuilder: (_) => const [PopupMenuItem(value: 'backup', child: Text('Yedekle / Geri Yükle'))],
           ),
         ],
         bottom: PreferredSize(
@@ -72,19 +63,24 @@ class _HomePageState extends ConsumerState<HomePage> {
             child: Column(
               children: [
                 SegmentedButton<TaskFilter>(
-                  // YENİLENDİ: Butonların içindeki dolgu (padding) azaltıldı.
-                  style: ButtonStyle(
-                    padding: WidgetStateProperty.all<EdgeInsets>(
-                      const EdgeInsets.symmetric(horizontal: 10.0), // Yatay dolguyu ayarla
-                    ),
-                  ),
+                  style: ButtonStyle(padding: WidgetStateProperty.all<EdgeInsets>(const EdgeInsets.symmetric(horizontal: 10.0))),
                   segments: const [
                     ButtonSegment(value: TaskFilter.all, label: Text('Tümü'), icon: Icon(Icons.list_alt)),
                     ButtonSegment(value: TaskFilter.today, label: Text('Bugün'), icon: Icon(Icons.today)),
                     ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
                   ],
                   selected: {_filter},
-                  onSelectionChanged: (s) => setState(() => _filter = s.first),
+                  // YENİLENDİ: Filtre değiştiğinde "Tamamlananlar" grubunun durumunu ayarla
+                  onSelectionChanged: (newSelection) {
+                    setState(() {
+                      _filter = newSelection.first;
+                      if (_filter == TaskFilter.done) {
+                        _collapsed[_SectionType.done] = false; // Tamamlanan sekmesindeyse aç
+                      } else {
+                        _collapsed[_SectionType.done] = true; // Diğer sekmelerdeyse kapat
+                      }
+                    });
+                  },
                 ),
                 const SizedBox(height: 10),
                 _InlineSearchField(controller: _searchCtl),
@@ -95,13 +91,7 @@ class _HomePageState extends ConsumerState<HomePage> {
       ),
       body: asyncList.when(
         loading: () => const Center(child: CircularProgressIndicator()),
-        error: (e, _) => RefreshIndicator(
-          onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
-          child: ListView(
-            physics: const AlwaysScrollableScrollPhysics(),
-            children: [ const SizedBox(height: 80), Center(child: Text('Hata: $e')), const SizedBox(height: 200) ],
-          ),
-        ),
+        error: (e, _) => RefreshIndicator(onRefresh: () => ref.read(taskListProvider.notifier).refresh(), child: ListView(physics: const AlwaysScrollableScrollPhysics(), children: [ const SizedBox(height: 80), Center(child: Text('Hata: $e')), const SizedBox(height: 200) ])),
         data: (items) {
           final filtered = _applyFilter(items, _filter);
           final flatList = _applySearch(filtered, _query);
@@ -109,13 +99,7 @@ class _HomePageState extends ConsumerState<HomePage> {
           final counts = _countsFor(buckets);
           final entries = _buildEntriesFromBuckets(buckets, collapsed: _collapsed);
           if (flatList.isEmpty) {
-            return RefreshIndicator(
-              onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                children: const [ SizedBox(height: 40), _EmptyState(), SizedBox(height: 200) ],
-              ),
-            );
+            return RefreshIndicator(onRefresh: () => ref.read(taskListProvider.notifier).refresh(), child: ListView(physics: const AlwaysScrollableScrollPhysics(), children: const [ SizedBox(height: 40), _EmptyState(), SizedBox(height: 200) ]));
           }
           return RefreshIndicator(
             onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
@@ -129,13 +113,7 @@ class _HomePageState extends ConsumerState<HomePage> {
                   final section = e.section!;
                   final c = counts[section]!;
                   final collapsed = _collapsed[section] ?? false;
-                  return KeyedSubtree(
-                    key: ValueKey('hdr_${section.name}'),
-                    child: _SectionHeader(
-                      section: section, total: c.total, done: c.done, collapsed: collapsed,
-                      onToggle: () => setState(() => _collapsed[section] = !(collapsed)),
-                    ),
-                  );
+                  return KeyedSubtree(key: ValueKey('hdr_${section.name}'), child: _SectionHeader(section: section, total: c.total, done: c.done, collapsed: collapsed, onToggle: () => setState(() => _collapsed[section] = !(collapsed))));
                 }
                 final t = e.task!;
                 return KeyedSubtree(key: ValueKey('row_${t.id}'), child: _TaskRow(task: t, ref: ref));
@@ -144,31 +122,17 @@ class _HomePageState extends ConsumerState<HomePage> {
           );
         },
       ),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: () async {
-          await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TaskEditPage()));
-        },
-        icon: const Icon(Icons.add),
-        label: const Text('Yeni görev'),
-      ),
+      floatingActionButton: FloatingActionButton.extended(onPressed: () async => await Navigator.of(context).push(MaterialPageRoute(builder: (_) => const TaskEditPage())), icon: const Icon(Icons.add), label: const Text('Yeni görev')),
     );
   }
 
   List<Task> _applyFilter(List<Task> src, TaskFilter f) {
     switch (f) {
       case TaskFilter.today:
-        final now = DateTime.now();
-        final start = DateTime(now.year, now.month, now.day);
-        final end = start.add(const Duration(days: 1));
-        return src.where((t) {
-          final d = t.due;
-          return d != null && d.isAfter(start) && d.isBefore(end);
-        }).toList();
-      case TaskFilter.done:
-        return src.where((t) => t.done).toList();
-      case TaskFilter.all:
-      default:
-        return src;
+        final now = DateTime.now(); final start = DateTime(now.year, now.month, now.day); final end = start.add(const Duration(days: 1));
+        return src.where((t) { final d = t.due; return d != null && d.isAfter(start) && d.isBefore(end); }).toList();
+      case TaskFilter.done: return src.where((t) => t.done).toList();
+      default: return src;
     }
   }
   
@@ -176,8 +140,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     if (q.isEmpty) return src;
     final lower = q.toLowerCase();
     return src.where((t) {
-      final title = t.title.toLowerCase();
-      final note = (t.note ?? '').toLowerCase();
+      final title = t.title.toLowerCase(); final note = (t.note ?? '').toLowerCase();
       final tagsMatch = t.tags.any((tag) => tag.name.toLowerCase().contains(lower));
       return title.contains(lower) || note.contains(lower) || tagsMatch;
     }).toList();
@@ -187,8 +150,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     if (t.done) return _SectionType.done;
     final now = DateTime.now();
     DateTime d(DateTime x) => DateTime(x.year, x.month, x.day);
-    final today = d(now);
-    final tomorrow = today.add(const Duration(days: 1));
+    final today = d(now); final tomorrow = today.add(const Duration(days: 1));
     if (t.due != null) {
       final dueD = d(t.due!);
       if (dueD == today) return _SectionType.today;
@@ -198,9 +160,7 @@ class _HomePageState extends ConsumerState<HomePage> {
   }
   
   Map<_SectionType, List<Task>> _bucketize(List<Task> list) {
-    final Map<_SectionType, List<Task>> buckets = {
-      _SectionType.today: [], _SectionType.tomorrow: [], _SectionType.later: [], _SectionType.done: [],
-    };
+    final Map<_SectionType, List<Task>> buckets = { _SectionType.today: [], _SectionType.tomorrow: [], _SectionType.later: [], _SectionType.done: [] };
     for (final t in list) { buckets[_groupFor(t)]!.add(t); }
     return buckets;
   }
@@ -215,14 +175,9 @@ class _HomePageState extends ConsumerState<HomePage> {
       final items = buckets[s]!;
       if (items.isEmpty) return;
       entries.add(_Entry.header(s));
-      if (!(collapsed[s] ?? false)) {
-        for (final t in items) { entries.add(_Entry.task(t)); }
-      }
+      if (!(collapsed[s] ?? false)) { for (final t in items) { entries.add(_Entry.task(t)); } }
     }
-    addSection(_SectionType.today);
-    addSection(_SectionType.tomorrow);
-    addSection(_SectionType.later);
-    addSection(_SectionType.done);
+    addSection(_SectionType.today); addSection(_SectionType.tomorrow); addSection(_SectionType.later); addSection(_SectionType.done);
     return entries;
   }
   
@@ -322,8 +277,8 @@ class _TaskRow extends StatelessWidget {
           return false;
         }
       },
-      secondaryBackground: ExcludeSemantics(child: Container(alignment: Alignment.centerRight, padding: const EdgeInsets.symmetric(horizontal: 16), color: Colors.red.withOpacity(.12), child: const Icon(Icons.delete, size: 28))),
-      background: ExcludeSemantics(child: Container(alignment: Alignment.centerLeft, padding: const EdgeInsets.symmetric(horizontal: 16), color: Colors.green.withOpacity(.12), child: Icon(t.done ? Icons.undo : Icons.check_circle, size: 28))),
+      secondaryBackground: ExcludeSemantics(child: Container(alignment: Alignment.centerRight, padding: const EdgeInsets.symmetric(horizontal: 16), color: Colors.red.withOpacity(0.8), child: const Icon(Icons.delete_sweep_outlined, color: Colors.white, size: 28))),
+      background: ExcludeSemantics(child: Container(alignment: Alignment.centerLeft, padding: const EdgeInsets.symmetric(horizontal: 16), color: t.done ? Colors.orange.withOpacity(0.8) : Colors.green.withOpacity(0.8), child: Icon(t.done ? Icons.undo_outlined : Icons.check_circle_outline, color: Colors.white, size: 28))),
       child: GestureDetector(
         behavior: HitTestBehavior.opaque,
         onLongPress: () {
@@ -341,11 +296,13 @@ class _SectionHeader extends StatelessWidget {
   final _SectionType section; final int total; final int done; final bool collapsed; final VoidCallback onToggle;
   String get _label { switch (section) { case _SectionType.today: return 'Bugün'; case _SectionType.tomorrow: return 'Yarın'; case _SectionType.later: return 'Sonra'; case _SectionType.done: return 'Tamamlanan'; } }
   IconData get _icon { switch (section) { case _SectionType.today: return Icons.today; case _SectionType.tomorrow: return Icons.calendar_view_day; case _SectionType.later: return Icons.upcoming; case _SectionType.done: return Icons.check_circle; } }
+
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final showProgress = section == _SectionType.today && total > 0;
     final progress = total == 0 ? 0.0 : (done / total);
+
     return InkWell(
       onTap: onToggle,
       child: Container(
@@ -355,8 +312,20 @@ class _SectionHeader extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(children: [ Icon(_icon, size: 18, color: scheme.primary), const SizedBox(width: 8), Expanded(child: Text(_label, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9), fontWeight: FontWeight.w600))), Text('$done/$total', style: Theme.of(context).textTheme.labelMedium), const SizedBox(width: 8), Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20) ]),
-            if (showProgress) ...[ const SizedBox(height: 8), ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0), minHeight: 6)) ],
+            Row(
+              children: [
+                Icon(_icon, size: 18, color: scheme.primary),
+                const SizedBox(width: 8),
+                Expanded(child: Text(_label, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9), fontWeight: FontWeight.w600))),
+                Text('$done/$total', style: Theme.of(context).textTheme.labelMedium),
+                const SizedBox(width: 8),
+                Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20),
+              ],
+            ),
+            if (showProgress) ...[
+              const SizedBox(height: 8),
+              ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0), minHeight: 6)),
+            ],
           ],
         ),
       ),
@@ -380,8 +349,8 @@ class _InlineSearchField extends StatelessWidget {
         suffixIcon: controller.text.isEmpty ? null : IconButton(tooltip: 'Temizle', onPressed: () => controller.clear(), icon: const Icon(Icons.clear)),
         filled: true,
         fillColor: scheme.surfaceContainerHighest.withOpacity(0.5),
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: scheme.outlineVariant)),
-        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: scheme.outlineVariant)),
+        border: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
+        enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide.none),
         focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(14), borderSide: BorderSide(color: scheme.primary)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 12),
       ),
