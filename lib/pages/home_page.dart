@@ -12,7 +12,7 @@ import '../widgets/task_tile.dart';
 enum TaskFilter { all, today, done }
 
 class _HomePageState extends ConsumerState<HomePage> {
-  Object? _filter = TaskFilter.all;
+  TaskFilter _filter = TaskFilter.today;
   final _searchCtl = TextEditingController();
   String _query = '';
 
@@ -40,7 +40,6 @@ class _HomePageState extends ConsumerState<HomePage> {
   @override
   Widget build(BuildContext context) {
     final asyncList = ref.watch(taskListProvider);
-    final asyncTags = ref.watch(allTagsProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -72,24 +71,20 @@ class _HomePageState extends ConsumerState<HomePage> {
             padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
             child: Column(
               children: [
-                SingleChildScrollView(
-                  scrollDirection: Axis.horizontal,
-                  child: asyncTags.when(
-                    data: (tags) => SegmentedButton<Object>(
-                      segments: [
-                        const ButtonSegment(value: TaskFilter.all, label: Text('Tümü'), icon: Icon(Icons.list_alt)),
-                        const ButtonSegment(value: TaskFilter.today, label: Text('Bugün'), icon: Icon(Icons.today)),
-                        const ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
-                        ...tags.map((tag) => ButtonSegment(value: tag, label: Text(tag.name), icon: const Icon(Icons.label_outline))),
-                      ],
-                      selected: {_filter!},
-                      onSelectionChanged: (s) => setState(() => _filter = s.first),
-                      emptySelectionAllowed: false,
-                      multiSelectionEnabled: false,
+                SegmentedButton<TaskFilter>(
+                  // YENİLENDİ: Butonların içindeki dolgu (padding) azaltıldı.
+                  style: ButtonStyle(
+                    padding: WidgetStateProperty.all<EdgeInsets>(
+                      const EdgeInsets.symmetric(horizontal: 10.0), // Yatay dolguyu ayarla
                     ),
-                    loading: () => const SizedBox(),
-                    error: (e,_) => const SizedBox(),
-                  )
+                  ),
+                  segments: const [
+                    ButtonSegment(value: TaskFilter.all, label: Text('Tümü'), icon: Icon(Icons.list_alt)),
+                    ButtonSegment(value: TaskFilter.today, label: Text('Bugün'), icon: Icon(Icons.today)),
+                    ButtonSegment(value: TaskFilter.done, label: Text('Tamamlanan'), icon: Icon(Icons.check_circle)),
+                  ],
+                  selected: {_filter},
+                  onSelectionChanged: (s) => setState(() => _filter = s.first),
                 ),
                 const SizedBox(height: 10),
                 _InlineSearchField(controller: _searchCtl),
@@ -110,11 +105,9 @@ class _HomePageState extends ConsumerState<HomePage> {
         data: (items) {
           final filtered = _applyFilter(items, _filter);
           final flatList = _applySearch(filtered, _query);
-
           final buckets = _bucketize(flatList);
           final counts = _countsFor(buckets);
           final entries = _buildEntriesFromBuckets(buckets, collapsed: _collapsed);
-
           if (flatList.isEmpty) {
             return RefreshIndicator(
               onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
@@ -124,7 +117,6 @@ class _HomePageState extends ConsumerState<HomePage> {
               ),
             );
           }
-
           return RefreshIndicator(
             onRefresh: () => ref.read(taskListProvider.notifier).refresh(),
             child: ListView.builder(
@@ -162,11 +154,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     );
   }
 
-  List<Task> _applyFilter(List<Task> src, Object? f) {
-    if (f is Tag) {
-      return src.where((task) => task.tags.any((t) => t.id == f.id)).toList();
-    }
-    
+  List<Task> _applyFilter(List<Task> src, TaskFilter f) {
     switch (f) {
       case TaskFilter.today:
         final now = DateTime.now();
@@ -213,9 +201,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     final Map<_SectionType, List<Task>> buckets = {
       _SectionType.today: [], _SectionType.tomorrow: [], _SectionType.later: [], _SectionType.done: [],
     };
-    for (final t in list) {
-      buckets[_groupFor(t)]!.add(t);
-    }
+    for (final t in list) { buckets[_groupFor(t)]!.add(t); }
     return buckets;
   }
   
@@ -248,8 +234,7 @@ class _HomePageState extends ConsumerState<HomePage> {
     }
     DateTime _at(int days, {int hours = 0}) {
       final base = DateTime.now().add(Duration(days: days, hours: hours));
-      final hour = t.due?.hour ?? 9;
-      final minute = t.due?.minute ?? 0;
+      final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
       return DateTime(base.year, base.month, base.day, hour, minute);
     }
     await showModalBottomSheet(
@@ -257,104 +242,32 @@ class _HomePageState extends ConsumerState<HomePage> {
       builder: (_) => ListView(
         shrinkWrap: true,
         children: [
-          ListTile(
-            leading: const Icon(Icons.alarm_add), title: const Text('1 saat ertele'),
-            onTap: () async {
-              final due = (t.due ?? DateTime.now()).add(const Duration(hours: 1));
-              await _apply(t.copyWith(done: false, due: due));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.schedule), title: const Text('3 saat ertele'),
-            onTap: () async {
-              final due = (t.due ?? DateTime.now()).add(const Duration(hours: 3));
-              await _apply(t.copyWith(done: false, due: due));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.today), title: const Text('Bugün'),
-            onTap: () async {
-              await _apply(_taskWithSectionApplied(t, _SectionType.today));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.calendar_view_day), title: const Text('Yarın'),
-            onTap: () async {
-              await _apply(_taskWithSectionApplied(t, _SectionType.tomorrow));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.date_range), title: const Text('+1 hafta'),
-            onTap: () async {
-              await _apply(t.copyWith(done: false, due: _at(7)));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: const Icon(Icons.event), title: const Text('+1 ay'),
-            onTap: () async {
-              final now = DateTime.now();
-              final nextMonth = DateTime(now.year, now.month + 1, now.day);
-              final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
-              await _apply(t.copyWith(done: false, due: DateTime(nextMonth.year, nextMonth.month, nextMonth.day, hour, minute)));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
+          ListTile(leading: const Icon(Icons.alarm_add), title: const Text('1 saat ertele'), onTap: () async { final due = (t.due ?? DateTime.now()).add(const Duration(hours: 1)); await _apply(t.copyWith(done: false, due: due)); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: const Icon(Icons.schedule), title: const Text('3 saat ertele'), onTap: () async { final due = (t.due ?? DateTime.now()).add(const Duration(hours: 3)); await _apply(t.copyWith(done: false, due: due)); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: const Icon(Icons.today), title: const Text('Bugün'), onTap: () async { await _apply(_taskWithSectionApplied(t, _SectionType.today)); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: const Icon(Icons.calendar_view_day), title: const Text('Yarın'), onTap: () async { await _apply(_taskWithSectionApplied(t, _SectionType.tomorrow)); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: const Icon(Icons.date_range), title: const Text('+1 hafta'), onTap: () async { await _apply(t.copyWith(done: false, due: _at(7))); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: const Icon(Icons.event), title: const Text('+1 ay'), onTap: () async { final now = DateTime.now(); final nextMonth = DateTime(now.year, now.month + 1, now.day); final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0; await _apply(t.copyWith(done: false, due: DateTime(nextMonth.year, nextMonth.month, nextMonth.day, hour, minute))); if (context.mounted) Navigator.pop(context); }),
           const Divider(height: 8),
-          ListTile(
-            leading: const Icon(Icons.back_hand),
-            title: const Text('Due’yu temizle (Sonra)'),
-            onTap: () async {
-              await _apply(_taskWithSectionApplied(t, _SectionType.later));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
-          ListTile(
-            leading: Icon(t.done ? Icons.undo : Icons.check_circle), title: Text(t.done ? 'Tamamlamayı geri al' : 'Tamamla'),
-            onTap: () async {
-              await _apply(t.copyWith(done: !t.done));
-              if (context.mounted) Navigator.pop(context);
-            },
-          ),
+          ListTile(leading: const Icon(Icons.back_hand), title: const Text('Due’yu temizle (Sonra)'), onTap: () async { await _apply(_taskWithSectionApplied(t, _SectionType.later)); if (context.mounted) Navigator.pop(context); }),
+          ListTile(leading: Icon(t.done ? Icons.undo : Icons.check_circle), title: Text(t.done ? 'Tamamlamayı geri al' : 'Tamamla'), onTap: () async { await _apply(t.copyWith(done: !t.done)); if (context.mounted) Navigator.pop(context); }),
         ],
       ),
     );
   }
 
-  // YENİLENDİ: `due` alanını `null` yapmak için `copyWith` yerine
-  // doğrudan yeni bir Task nesnesi oluşturuluyor.
   Task _taskWithSectionApplied(Task t, _SectionType section) {
     switch (section) {
       case _SectionType.today:
-        final base = DateTime.now();
-        final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
+        final base = DateTime.now(); final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
         return t.copyWith(done: false, due: DateTime(base.year, base.month, base.day, hour, minute));
       case _SectionType.tomorrow:
-        final now = DateTime.now();
-        final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
+        final now = DateTime.now(); final hour = t.due?.hour ?? 9; final minute = t.due?.minute ?? 0;
         final tom = DateTime(now.year, now.month, now.day).add(const Duration(days: 1));
         return t.copyWith(done: false, due: DateTime(tom.year, tom.month, tom.day, hour, minute));
       case _SectionType.later:
-        // Hatanın çözümü burada: `copyWith` `due` alanını null yapamadığı için,
-        // yeni bir Task nesnesini elle oluşturarak bu sorunu aşıyoruz.
-        return Task(
-          id: t.id,
-          title: t.title,
-          note: t.note,
-          due: null, // Bitiş tarihini temizle
-          repeat: t.repeat,
-          done: false, // Görevi tamamlanmamış olarak işaretle
-          sort: t.sort,
-          createdAt: t.createdAt,
-          updatedAt: DateTime.now(), // Güncellenme tarihini ayarla
-          tags: t.tags,
-        );
-      case _SectionType.done:
-        return t.copyWith(done: true);
+        return Task(id: t.id, title: t.title, note: t.note, due: null, repeat: t.repeat, done: false, sort: t.sort, createdAt: t.createdAt, updatedAt: DateTime.now(), tags: t.tags);
+      case _SectionType.done: return t.copyWith(done: true);
     }
   }
 }
@@ -380,7 +293,6 @@ class _TaskRow extends StatelessWidget {
   const _TaskRow({required this.task, required this.ref});
   final Task task;
   final WidgetRef ref;
-
   @override
   Widget build(BuildContext context) {
     final t = task;
@@ -389,25 +301,13 @@ class _TaskRow extends StatelessWidget {
       direction: DismissDirection.horizontal,
       confirmDismiss: (direction) async {
         if (direction == DismissDirection.endToStart) {
-          final ok = await showDialog<bool>(
-            context: context,
-            builder: (_) => AlertDialog(
-              title: const Text('Silinsin mi?'), content: Text('“${t.title}” kalıcı olarak silinecek.'),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')),
-                FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Sil')),
-              ],
-            ),
-          );
+          final ok = await showDialog<bool>(context: context, builder: (_) => AlertDialog(title: const Text('Silinsin mi?'), content: Text('“${t.title}” kalıcı olarak silinecek.'), actions: [ TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Vazgeç')), FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Sil')) ]));
           if (ok == true) {
             final removed = t;
             await ref.read(taskListProvider.notifier).remove(t);
             if (context.mounted) {
               ScaffoldMessenger.of(context).hideCurrentSnackBar();
-              ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-                content: Text('Silindi: ${removed.title}'),
-                action: SnackBarAction(label: 'Geri Al', onPressed: () async => await ref.read(taskListProvider.notifier).add(removed.copyWith(id: null))),
-              ));
+              ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Silindi: ${removed.title}'), action: SnackBarAction(label: 'Geri Al', onPressed: () async => await ref.read(taskListProvider.notifier).add(removed.copyWith(id: null)))));
             }
             return true;
           }
@@ -438,34 +338,14 @@ class _TaskRow extends StatelessWidget {
 
 class _SectionHeader extends StatelessWidget {
   const _SectionHeader({ required this.section, required this.total, required this.done, required this.collapsed, required this.onToggle });
-  final _SectionType section;
-  final int total;
-  final int done;
-  final bool collapsed;
-  final VoidCallback onToggle;
-  String get _label {
-    switch (section) {
-      case _SectionType.today: return 'Bugün';
-      case _SectionType.tomorrow: return 'Yarın';
-      case _SectionType.later: return 'Sonra';
-      case _SectionType.done: return 'Tamamlanan';
-    }
-  }
-  IconData get _icon {
-    switch (section) {
-      case _SectionType.today: return Icons.today;
-      case _SectionType.tomorrow: return Icons.calendar_view_day;
-      case _SectionType.later: return Icons.upcoming;
-      case _SectionType.done: return Icons.check_circle;
-    }
-  }
-
+  final _SectionType section; final int total; final int done; final bool collapsed; final VoidCallback onToggle;
+  String get _label { switch (section) { case _SectionType.today: return 'Bugün'; case _SectionType.tomorrow: return 'Yarın'; case _SectionType.later: return 'Sonra'; case _SectionType.done: return 'Tamamlanan'; } }
+  IconData get _icon { switch (section) { case _SectionType.today: return Icons.today; case _SectionType.tomorrow: return Icons.calendar_view_day; case _SectionType.later: return Icons.upcoming; case _SectionType.done: return Icons.check_circle; } }
   @override
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final showProgress = section == _SectionType.today && total > 0;
     final progress = total == 0 ? 0.0 : (done / total);
-
     return InkWell(
       onTap: onToggle,
       child: Container(
@@ -475,20 +355,8 @@ class _SectionHeader extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Row(
-              children: [
-                Icon(_icon, size: 18, color: scheme.primary),
-                const SizedBox(width: 8),
-                Expanded(child: Text(_label, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9), fontWeight: FontWeight.w600))),
-                Text('$done/$total', style: Theme.of(context).textTheme.labelMedium),
-                const SizedBox(width: 8),
-                Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20),
-              ],
-            ),
-            if (showProgress) ...[
-              const SizedBox(height: 8),
-              ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0), minHeight: 6)),
-            ],
+            Row(children: [ Icon(_icon, size: 18, color: scheme.primary), const SizedBox(width: 8), Expanded(child: Text(_label, style: Theme.of(context).textTheme.titleSmall?.copyWith(color: Theme.of(context).textTheme.titleSmall?.color?.withOpacity(.9), fontWeight: FontWeight.w600))), Text('$done/$total', style: Theme.of(context).textTheme.labelMedium), const SizedBox(width: 8), Icon(collapsed ? Icons.expand_more : Icons.expand_less, size: 20) ]),
+            if (showProgress) ...[ const SizedBox(height: 8), ClipRRect(borderRadius: BorderRadius.circular(6), child: LinearProgressIndicator(value: progress.clamp(0.0, 1.0), minHeight: 6)) ],
           ],
         ),
       ),
@@ -499,7 +367,6 @@ class _SectionHeader extends StatelessWidget {
 class _InlineSearchField extends StatelessWidget {
   const _InlineSearchField({required this.controller});
   final TextEditingController controller;
-
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
@@ -533,10 +400,8 @@ class _EmptyState extends StatelessWidget {
         child: Column(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Icon(Icons.inbox_outlined, size: 72, color: scheme.outline),
-            const SizedBox(height: 12),
-            Text('Hiç sonuç yok', style: Theme.of(context).textTheme.titleLarge, textAlign: TextAlign.center),
-            const SizedBox(height: 8),
+            Icon(Icons.inbox_outlined, size: 72, color: scheme.outline), const SizedBox(height: 12),
+            Text('Hiç sonuç yok', style: Theme.of(context).textTheme.titleLarge, textAlign: TextAlign.center), const SizedBox(height: 8),
             Text('Arama terimini değiştirin veya yeni bir görev ekleyin.', textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyMedium?.copyWith(color: Theme.of(context).textTheme.bodyMedium?.color?.withOpacity(0.7))),
           ],
         ),

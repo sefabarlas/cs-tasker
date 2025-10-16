@@ -49,13 +49,23 @@ class _TaskEditPageState extends ConsumerState<TaskEditPage> {
     final firstDate = DateTime(now.year - 1);
     final lastDate = DateTime(now.year + 5);
 
-    final date = await showDatePicker(context: context, initialDate: initialDate, firstDate: firstDate, lastDate: lastDate, helpText: 'Tarih seç', cancelText: 'Vazgeç', confirmText: 'Devam', builder: (ctx, child) => Theme(data: theme.copyWith(useMaterial3: true), child: child!));
-    if (date == null) return;
+    final date = await showDatePicker(
+      context: context,
+      locale: const Locale('tr', 'TR'),
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      helpText: 'Tarih seç',
+      cancelText: 'Vazgeç',
+      confirmText: 'Devam',
+      builder: (ctx, child) =>
+          Theme(data: theme.copyWith(useMaterial3: true), child: child!),
+    );
 
     final tod = await showTimePicker(context: context, initialTime: TimeOfDay.fromDateTime(_due ?? now), helpText: 'Saat seç', cancelText: 'Vazgeç', confirmText: 'Tamam', builder: (ctx, child) => Theme(data: theme.copyWith(useMaterial3: true), child: child!));
     if (tod == null) return;
 
-    setState(() => _due = DateTime(date.year, date.month, date.day, tod.hour, tod.minute));
+    setState(() => _due = DateTime(date!.year, date.month, date.day, tod.hour, tod.minute));
   }
 
   void _setQuick(DateTime dt) => setState(() => _due = dt);

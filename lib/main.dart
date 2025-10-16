@@ -1,5 +1,6 @@
 // lib/main.dart
 import 'package:flutter/material.dart';
+import 'package:flutter_localizations/flutter_localizations.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_native_timezone_updated_gradle/flutter_native_timezone.dart';
 import 'package:timezone/data/latest.dart' as tz;
@@ -81,6 +82,16 @@ class TaskerApp extends StatelessWidget {
   Widget build(BuildContext context) {
     final seed = Colors.indigo;
     return MaterialApp(
+      localizationsDelegates: const [
+        GlobalMaterialLocalizations.delegate,
+        GlobalWidgetsLocalizations.delegate,
+        GlobalCupertinoLocalizations.delegate,
+      ],
+      supportedLocales: const [
+        Locale('tr', 'TR'), // Türkçe desteği
+      ],
+      locale: const Locale('tr', 'TR'), // Uygulamanın varsayılan dilini Türkçe yap
+      // ---- Bitiş ----
       title: appName,
       navigatorKey: navigatorKey,
       theme: ThemeData(
