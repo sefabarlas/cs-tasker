@@ -1,113 +1,120 @@
-import 'dart:async';
+// lib/src/notifications/notification_service.dart
 import 'dart:io';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:timezone/timezone.dart' as tz;
+import 'package:tasker/data/task_repository.dart';
+import 'package:tasker/src/data/db.dart';
+import 'package:tasker/models/task.dart' as model_task;
+
+// --- ADIM 1: EN ÖNEMLİ KISIM ---
+// Bu fonksiyon, sınıfın dışında, global bir alanda olmalıdır.
+// Uygulama kapalıyken bile Flutter tarafından çağrılabilmesi için bu gereklidir.
+@pragma('vm:entry-point')
+void notificationTapBackground(NotificationResponse notificationResponse) {
+  // Bu fonksiyon, onDidReceiveNotificationResponse ile aynı işi yapacak.
+  // Bu yüzden doğrudan ona yönlendiriyoruz.
+  onDidReceiveNotificationResponse(notificationResponse);
+}
+
+// Bu fonksiyon da global olmalı veya statik bir metodun içinde çağrılmalıdır.
+// Bildirime tıklandığında veya bir aksiyon seçildiğinde çalışır.
+void onDidReceiveNotificationResponse(NotificationResponse details) async {
+  final payload = details.payload;
+  final actionId = details.actionId;
+
+  if (payload == null || !payload.startsWith('taskId:')) {
+    return;
+  }
+
+  final taskId = payload.substring('taskId:'.length);
+
+  // Arka planda veritabanına erişmek için YENİ bir bağlantı oluşturulur.
+  final db = AppDb();
+  final repo = TaskRepository(db);
+
+  final task = await repo.getById(taskId);
+  if (task == null) {
+    await db.close();
+    return;
+  }
+
+  model_task.Task? updatedTask;
+
+  // Hangi aksiyona tıklandığını kontrol et
+  switch (actionId) {
+    case 'act_done':
+      updatedTask = task.copyWith(done: true);
+      break;
+    case 'act_snooze_1h':
+      final newDueDate = DateTime.now().add(const Duration(hours: 1));
+      updatedTask = task.copyWith(due: newDueDate, done: false);
+      break;
+    case 'act_snooze_tomorrow':
+      final now = DateTime.now();
+      final newDueDate = DateTime(now.year, now.month, now.day + 1, 9, 0); // Yarın sabah 09:00
+      updatedTask = task.copyWith(due: newDueDate, done: false);
+      break;
+  }
+
+  if (updatedTask != null) {
+    await repo.update(updatedTask);
+  }
+
+  // İşlem bittikten sonra veritabanı bağlantısını kapat. Bu çok önemli!
+  await db.close();
+}
+
 
 class NotificationService {
   static final _flnp = FlutterLocalNotificationsPlugin();
-  static final StreamController<String> _tapPayloadCtrl =
-      StreamController<String>.broadcast();
 
-  static Stream<String> get onNotificationTap => _tapPayloadCtrl.stream;
-
-  /// Uygulama ilk açıldığında çağrılır.
   static Future<void> init() async {
-    final androidInit = const AndroidInitializationSettings(
-      '@mipmap/ic_launcher',
-    );
+    final androidInit = const AndroidInitializationSettings('@mipmap/ic_launcher');
 
-    // 👇 const KALDIRILDI — çünkü içindeki kategoriler const olamaz
     final darwinInit = DarwinInitializationSettings(
-      requestAlertPermission: false,
-      requestBadgePermission: false,
-      requestSoundPermission: false,
       notificationCategories: [
-        DarwinNotificationCategory(
-          'task_actions',
-          actions: [
-            DarwinNotificationAction.plain('complete', 'Tamamla'),
-            DarwinNotificationAction.plain('snooze5', '5 dk ertele'),
-          ],
-          options: {DarwinNotificationCategoryOption.hiddenPreviewShowTitle},
-        ),
+        DarwinNotificationCategory('task_actions', actions: [
+          DarwinNotificationAction.plain('act_done', 'Tamamla'),
+          DarwinNotificationAction.plain('act_snooze_1h', '1 Saat Ertele'),
+          DarwinNotificationAction.plain('act_snooze_tomorrow', 'Yarına Ertele'),
+        ]),
       ],
     );
 
-    final settings = InitializationSettings(
-      android: androidInit,
-      iOS: darwinInit,
-      macOS: darwinInit,
-    );
+    final settings = InitializationSettings(android: androidInit, iOS: darwinInit, macOS: darwinInit);
 
     await _flnp.initialize(
       settings,
-      onDidReceiveNotificationResponse: (resp) async {
-        final payload = resp.payload ?? '';
-        final action = resp.actionId;
-
-        if (action == 'complete') {
-          _tapPayloadCtrl.add('action:complete;$payload');
-        } else if (action == 'snooze5') {
-          _tapPayloadCtrl.add('action:snooze5;$payload');
-        } else {
-          _tapPayloadCtrl.add(payload);
-        }
-      },
+      onDidReceiveNotificationResponse: onDidReceiveNotificationResponse,
       onDidReceiveBackgroundNotificationResponse: notificationTapBackground,
     );
 
-    // 🔔 Platform bazlı izinler
-    if (Platform.isAndroid) {
-      final android = _flnp
-          .resolvePlatformSpecificImplementation<
-            AndroidFlutterLocalNotificationsPlugin
-          >();
-      await android?.requestNotificationsPermission();
-    } else if (Platform.isIOS || Platform.isMacOS) {
-      final darwin = _flnp
-          .resolvePlatformSpecificImplementation<
-            IOSFlutterLocalNotificationsPlugin
-          >();
-      await darwin?.requestPermissions(alert: true, badge: true, sound: true);
+    if (Platform.isIOS) {
+      await _flnp.resolvePlatformSpecificImplementation<IOSFlutterLocalNotificationsPlugin>()?.requestPermissions(alert: true, badge: true, sound: true);
+    } else if (Platform.isAndroid) {
+      await _flnp.resolvePlatformSpecificImplementation<AndroidFlutterLocalNotificationsPlugin>()?.requestNotificationsPermission();
     }
   }
 
-  @pragma('vm:entry-point')
-  static void notificationTapBackground(NotificationResponse resp) {
-    // arka plan tıklamaları sessizce geçilir
+  static NotificationDetails _getTaskNotificationDetails() {
+    return const NotificationDetails(
+      android: AndroidNotificationDetails(
+        'reminder_channel_id',
+        'Reminders',
+        channelDescription: 'Task reminders',
+        importance: Importance.max,
+        priority: Priority.high,
+        actions: <AndroidNotificationAction>[
+          AndroidNotificationAction('act_done', 'Tamamla'),
+          AndroidNotificationAction('act_snooze_1h', '1 Saat Ertele'),
+          AndroidNotificationAction('act_snooze_tomorrow', 'Yarına Ertele'),
+        ],
+      ),
+      iOS: DarwinNotificationDetails(categoryIdentifier: 'task_actions'),
+      macOS: DarwinNotificationDetails(categoryIdentifier: 'task_actions'),
+    );
   }
 
-  /// Anında gösterilen bildirim
-  static Future<void> showInstant({
-    required int id,
-    required String title,
-    required String body,
-    String? payload,
-  }) async {
-    const android = AndroidNotificationDetails(
-      'default_channel_id',
-      'General',
-      channelDescription: 'General notifications',
-      importance: Importance.high,
-      priority: Priority.high,
-    );
-
-    const darwin = DarwinNotificationDetails(
-      presentAlert: true,
-      presentBadge: true,
-      presentSound: true,
-    );
-
-    const details = NotificationDetails(
-      android: android,
-      iOS: darwin,
-      macOS: darwin,
-    );
-
-    await _flnp.show(id, title, body, details, payload: payload);
-  }
-
-  /// Zamanlı (tek seferlik) bildirim planlama
   static Future<void> scheduleAt({
     required int id,
     required String title,
@@ -116,48 +123,16 @@ class NotificationService {
     String? payload,
   }) async {
     final now = tz.TZDateTime.now(tz.local);
-    if (!when.isAfter(now.add(const Duration(seconds: 1)))) {
-      // geçmiş bir zaman => planlama yapma
-      return;
-    }
-
-    final android = AndroidNotificationDetails(
-      'reminder_channel_id',
-      'Reminders',
-      channelDescription: 'Task reminders',
-      importance: Importance.high,
-      priority: Priority.high,
-      actions: [
-        const AndroidNotificationAction('complete', 'Tamamla'),
-        const AndroidNotificationAction('snooze5', '5 dk ertele'),
-      ],
-    );
-
-    final darwin = const DarwinNotificationDetails(
-      categoryIdentifier: 'task_actions',
-    );
-
-    final details = NotificationDetails(
-      android: android,
-      iOS: darwin,
-      macOS: darwin,
-    );
-
+    if (!when.isAfter(now.add(const Duration(seconds: 1)))) return;
     await _flnp.zonedSchedule(
-      id,
-      title,
-      body,
-      when,
-      details,
+      id, title, body, when,
+      _getTaskNotificationDetails(),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       payload: payload,
-      matchDateTimeComponents: null,
     );
   }
 
-  /// Günlük tekrar eden bildirim
   static Future<void> scheduleDaily({
     required int id,
     required String title,
@@ -165,43 +140,16 @@ class NotificationService {
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
-    final android = AndroidNotificationDetails(
-      'reminder_channel_id',
-      'Reminders',
-      channelDescription: 'Task reminders',
-      importance: Importance.high,
-      priority: Priority.high,
-      actions: [
-        const AndroidNotificationAction('complete', 'Tamamla'),
-        const AndroidNotificationAction('snooze5', '5 dk ertele'),
-      ],
-    );
-
-    final darwin = const DarwinNotificationDetails(
-      categoryIdentifier: 'task_actions',
-    );
-
-    final details = NotificationDetails(
-      android: android,
-      iOS: darwin,
-      macOS: darwin,
-    );
-
     await _flnp.zonedSchedule(
-      id,
-      title,
-      body,
-      firstTime,
-      details,
+      id, title, body, firstTime,
+      _getTaskNotificationDetails(),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       matchDateTimeComponents: DateTimeComponents.time,
       payload: payload,
     );
   }
 
-  /// Haftalık tekrar eden bildirim
   static Future<void> scheduleWeekly({
     required int id,
     required String title,
@@ -209,43 +157,16 @@ class NotificationService {
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
-    final android = AndroidNotificationDetails(
-      'reminder_channel_id',
-      'Reminders',
-      channelDescription: 'Task reminders',
-      importance: Importance.high,
-      priority: Priority.high,
-      actions: [
-        const AndroidNotificationAction('complete', 'Tamamla'),
-        const AndroidNotificationAction('snooze5', '5 dk ertele'),
-      ],
-    );
-
-    final darwin = const DarwinNotificationDetails(
-      categoryIdentifier: 'task_actions',
-    );
-
-    final details = NotificationDetails(
-      android: android,
-      iOS: darwin,
-      macOS: darwin,
-    );
-
     await _flnp.zonedSchedule(
-      id,
-      title,
-      body,
-      firstTime,
-      details,
+      id, title, body, firstTime,
+      _getTaskNotificationDetails(),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       matchDateTimeComponents: DateTimeComponents.dayOfWeekAndTime,
       payload: payload,
     );
   }
-
-  /// Aylık tekrar eden bildirim
+  
   static Future<void> scheduleMonthly({
     required int id,
     required String title,
@@ -253,42 +174,15 @@ class NotificationService {
     required tz.TZDateTime firstTime,
     String? payload,
   }) async {
-    final android = AndroidNotificationDetails(
-      'reminder_channel_id',
-      'Reminders',
-      channelDescription: 'Task reminders',
-      importance: Importance.high,
-      priority: Priority.high,
-      actions: [
-        const AndroidNotificationAction('complete', 'Tamamla'),
-        const AndroidNotificationAction('snooze5', '5 dk ertele'),
-      ],
-    );
-
-    final darwin = const DarwinNotificationDetails(
-      categoryIdentifier: 'task_actions',
-    );
-
-    final details = NotificationDetails(
-      android: android,
-      iOS: darwin,
-      macOS: darwin,
-    );
-
     await _flnp.zonedSchedule(
-      id,
-      title,
-      body,
-      firstTime,
-      details,
+      id, title, body, firstTime,
+      _getTaskNotificationDetails(),
       androidScheduleMode: AndroidScheduleMode.exactAllowWhileIdle,
-      uiLocalNotificationDateInterpretation:
-          UILocalNotificationDateInterpretation.absoluteTime,
+      uiLocalNotificationDateInterpretation: UILocalNotificationDateInterpretation.absoluteTime,
       matchDateTimeComponents: DateTimeComponents.dayOfMonthAndTime,
       payload: payload,
     );
   }
 
-  /// Belirli bir bildirimi iptal et
   static Future<void> cancel(int id) => _flnp.cancel(id);
 }
